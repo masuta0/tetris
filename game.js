@@ -1,95 +1,41 @@
 // =========================================================
-// Firebase設定（安全な初期化）
+// RESTful Table API Helper
 // =========================================================
-let db = null;
-const firebaseConfig = {
-    apiKey: "AIzaSyCwRHrb9D-Oqacf174qy6xHCdXmg_mcodg",
-    authDomain: "tetoris-17371.firebaseapp.com",
-    projectId: "tetoris-17371",
-    storageBucket: "tetoris-17371.firebasestorage.app",
-    messagingSenderId: "807363112631",
-    appId: "1:807363112631:web:ac778e812412f98b196732"
-};
-
-function initFirebase() {
-    try {
-        if (typeof firebase !== 'undefined' && firebase.apps) {
-            if (!firebase.apps.length) {
-                firebase.initializeApp(firebaseConfig);
-            }
-            db = firebase.firestore();
-            console.log("Firebase connected");
-        }
-    } catch (e) {
-        console.warn("Firebase offline mode");
-    }
-}
-initFirebase();
-
-// =========================================================
-// ★ オンライン対戦ベースクラス
-// =========================================================
-class MultiplayerManager {
-    constructor(db, gameInstance) {
-        this.db = db;
-        this.game = gameInstance;
-        this.roomId = null;
-        this.playerId = gameInstance.userId;
-        this.isHost = false;
-        this.unsubscribe = null;
-    }
-
-    async createRoom() {
-        if (!this.db) { alert("オフラインモードです"); return; }
-        try {
-            const newRoom = await this.db.collection('rooms').add({
-                player1: this.playerId,
-                player2: null,
-                status: 'waiting',
-                p1Board: [], p2Board: [], p1Score: 0, p2Score: 0,
-                createdAt: firebase.firestore.FieldValue.serverTimestamp()
-            });
-            this.roomId = newRoom.id;
-            this.isHost = true;
-            this.listenToRoom();
-            document.getElementById('multiplayer-status').innerText = `ルームを作成しました。ID: ${this.roomId}`;
-        } catch(e) { console.error("Room creation failed", e); }
-    }
-
-    async joinRoom(roomId) {
-        if (!this.db) { alert("オフラインモードです"); return; }
-        try {
-            const roomRef = this.db.collection('rooms').doc(roomId);
-            const doc = await roomRef.get();
-            if (doc.exists && doc.data().status === 'waiting') {
-                await roomRef.update({ player2: this.playerId, status: 'playing' });
-                this.roomId = roomId;
-                this.isHost = false;
-                this.listenToRoom();
-                document.getElementById('multiplayer-status').innerText = "ルームに参加しました！対戦開始！";
-            } else {
-                alert("ルームが見つからないか、既に満員です");
-            }
-        } catch(e) { console.error("Join room failed", e); }
-    }
-
-    listenToRoom() {
-        if (!this.roomId) return;
-        this.unsubscribe = this.db.collection('rooms').doc(this.roomId).onSnapshot(doc => {
-            const data = doc.data();
-            if (data && data.status === 'playing') {
-                document.getElementById('multiplayer-status').innerText = "対戦中！";
-                // TODO: 相手の盤面更新ロジックをここに書く
-            }
+const API = {
+    async get(table, params = {}) {
+        const query = new URLSearchParams(params).toString();
+        const res = await fetch(`tables/${table}?${query}`);
+        return res.json();
+    },
+    async getOne(table, id) {
+        const res = await fetch(`tables/${table}/${id}`);
+        return res.json();
+    },
+    async post(table, data) {
+        const res = await fetch(`tables/${table}`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
         });
+        return res.json();
+    },
+    async put(table, id, data) {
+        const res = await fetch(`tables/${table}/${id}`, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        return res.json();
+    },
+    async patch(table, id, data) {
+        const res = await fetch(`tables/${table}/${id}`, {
+            method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        });
+        return res.json();
+    },
+    async delete(table, id) {
+        await fetch(`tables/${table}/${id}`, { method: 'DELETE' });
     }
-
-    async sendBoardUpdate(boardData, score) {
-        if (!this.roomId || !this.db) return;
-        const updateField = this.isHost ? { p1Board: boardData, p1Score: score } : { p2Board: boardData, p2Score: score };
-        await this.db.collection('rooms').doc(this.roomId).update(updateField);
-    }
-}
+};
 
 // =========================================================
 // パーティクルクラス
@@ -141,6 +87,235 @@ class Particle {
 }
 
 // =========================================================
+// オンライン対戦マネージャー (RESTful Table API)
+// =========================================================
+class MultiplayerManager {
+    constructor(gameInstance) {
+        this.game = gameInstance;
+        this.roomId = null;
+        this.roomRecordId = null; // DB record id
+        this.playerId = gameInstance.userId;
+        this.isHost = false;
+        this.pollInterval = null;
+        this.opponentBoard = [];
+        this.opponentScore = 0;
+        this.opponentAlive = true;
+        this.pendingGarbage = 0;  // お邪魔ライン受信待ち
+        this.lastAttackSent = 0;
+    }
+
+    // ルーム作成
+    async createRoom() {
+        try {
+            const roomCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+            const room = await API.post('tetris_rooms', {
+                roomCode: roomCode,
+                player1Id: this.playerId,
+                player1Name: this.game.playerName,
+                player2Id: '',
+                player2Name: '',
+                status: 'waiting',
+                p1Board: '[]', p2Board: '[]',
+                p1Score: 0, p2Score: 0,
+                p1Attack: 0, p2Attack: 0,
+                p1Garbage: 0, p2Garbage: 0,
+                p1Alive: true, p2Alive: true,
+                winner: ''
+            });
+            this.roomRecordId = room.id;
+            this.roomId = roomCode;
+            this.isHost = true;
+            this.startPolling();
+
+            document.getElementById('multiplayer-status').innerHTML =
+                `<div class="room-created">` +
+                `<p>ルームを作成しました！</p>` +
+                `<p class="room-code-display">${roomCode}</p>` +
+                `<p style="font-size:0.8rem;opacity:0.7">このコードを対戦相手に伝えてください</p>` +
+                `<p style="font-size:0.8rem;color:#ffcc00;margin-top:8px">🔄 対戦相手を待っています...</p>` +
+                `</div>`;
+        } catch (e) {
+            console.error("Room creation failed", e);
+            document.getElementById('multiplayer-status').textContent = 'ルーム作成に失敗しました';
+        }
+    }
+
+    // ルーム参加
+    async joinRoom(code) {
+        try {
+            const upperCode = code.toUpperCase();
+            const res = await API.get('tetris_rooms', { search: upperCode, limit: 50 });
+            const room = (res.data || []).find(r => r.roomCode === upperCode && r.status === 'waiting');
+            if (!room) {
+                alert('ルームが見つからないか、既に満員です');
+                return;
+            }
+            await API.patch('tetris_rooms', room.id, {
+                player2Id: this.playerId,
+                player2Name: this.game.playerName,
+                status: 'playing'
+            });
+            this.roomRecordId = room.id;
+            this.roomId = upperCode;
+            this.isHost = false;
+            this.startPolling();
+            document.getElementById('multiplayer-status').innerHTML =
+                `<p style="color:var(--green);">✅ ルームに参加しました！対戦開始を待っています...</p>`;
+            // 少し待ってからゲーム画面に遷移
+            setTimeout(() => this.game.startMultiplayerGame(), 1000);
+        } catch (e) {
+            console.error("Join room failed", e);
+            alert('ルームへの参加に失敗しました');
+        }
+    }
+
+    // ポーリングでルーム状態を監視
+    startPolling() {
+        if (this.pollInterval) clearInterval(this.pollInterval);
+        this.pollInterval = setInterval(() => this.pollRoom(), 300);
+    }
+
+    stopPolling() {
+        if (this.pollInterval) { clearInterval(this.pollInterval); this.pollInterval = null; }
+    }
+
+    async pollRoom() {
+        if (!this.roomRecordId) return;
+        try {
+            const room = await API.getOne('tetris_rooms', this.roomRecordId);
+            if (!room || room.status === 'finished') {
+                // ゲーム終了
+                if (room && room.winner) {
+                    const isWinner = room.winner === this.playerId;
+                    this.game.showMultiplayerResult(isWinner, room);
+                }
+                this.stopPolling();
+                return;
+            }
+
+            // ホストの場合: ステータスがplayingに変わったらゲーム開始
+            if (this.isHost && room.status === 'playing' && !this.game.multiplayerStarted) {
+                this.game.startMultiplayerGame();
+            }
+
+            // 相手のボード・スコアを更新
+            if (this.isHost) {
+                try { this.opponentBoard = JSON.parse(room.p2Board || '[]'); } catch (e) { }
+                this.opponentScore = room.p2Score || 0;
+                this.opponentAlive = room.p2Alive !== false;
+                // 相手からの攻撃（p2Attack）を確認
+                const newGarbage = room.p2Attack || 0;
+                if (newGarbage > this.lastAttackSent) {
+                    this.pendingGarbage += (newGarbage - this.lastAttackSent);
+                    this.lastAttackSent = newGarbage;
+                }
+            } else {
+                try { this.opponentBoard = JSON.parse(room.p1Board || '[]'); } catch (e) { }
+                this.opponentScore = room.p1Score || 0;
+                this.opponentAlive = room.p1Alive !== false;
+                // 相手からの攻撃（p1Attack）を確認
+                const newGarbage = room.p1Attack || 0;
+                if (newGarbage > this.lastAttackSent) {
+                    this.pendingGarbage += (newGarbage - this.lastAttackSent);
+                    this.lastAttackSent = newGarbage;
+                }
+            }
+
+            // 相手が死んだら勝ち
+            if (!this.opponentAlive && this.game.multiplayerStarted && this.game.gameRunning) {
+                this.game.showMultiplayerResult(true, room);
+            }
+        } catch (e) {
+            // ネットワークエラーは無視（次回ポーリングで再取得）
+        }
+    }
+
+    // ボード状態を送信
+    async sendUpdate(boardData, score) {
+        if (!this.roomRecordId) return;
+        try {
+            if (this.isHost) {
+                await API.patch('tetris_rooms', this.roomRecordId, {
+                    p1Board: JSON.stringify(boardData),
+                    p1Score: score
+                });
+            } else {
+                await API.patch('tetris_rooms', this.roomRecordId, {
+                    p2Board: JSON.stringify(boardData),
+                    p2Score: score
+                });
+            }
+        } catch (e) { }
+    }
+
+    // 攻撃を送信
+    async sendAttack(lines) {
+        if (!this.roomRecordId || lines <= 0) return;
+        try {
+            const room = await API.getOne('tetris_rooms', this.roomRecordId);
+            if (this.isHost) {
+                await API.patch('tetris_rooms', this.roomRecordId, {
+                    p1Attack: (room.p1Attack || 0) + lines
+                });
+            } else {
+                await API.patch('tetris_rooms', this.roomRecordId, {
+                    p2Attack: (room.p2Attack || 0) + lines
+                });
+            }
+        } catch (e) { }
+    }
+
+    // 死亡通知
+    async notifyDeath() {
+        if (!this.roomRecordId) return;
+        try {
+            if (this.isHost) {
+                await API.patch('tetris_rooms', this.roomRecordId, {
+                    p1Alive: false,
+                    status: 'finished',
+                    winner: '' // 相手のIDはpollで設定される
+                });
+            } else {
+                await API.patch('tetris_rooms', this.roomRecordId, {
+                    p2Alive: false,
+                    status: 'finished',
+                    winner: ''
+                });
+            }
+        } catch (e) { }
+    }
+
+    // 受信したお邪魔ラインを消費
+    consumeGarbage() {
+        const g = this.pendingGarbage;
+        this.pendingGarbage = 0;
+        return g;
+    }
+
+    // 相殺: 攻撃力でお邪魔を相殺
+    cancelGarbage(attackLines) {
+        if (this.pendingGarbage > 0) {
+            const cancelled = Math.min(attackLines, this.pendingGarbage);
+            this.pendingGarbage -= cancelled;
+            return attackLines - cancelled; // 残り攻撃力
+        }
+        return attackLines;
+    }
+
+    cleanup() {
+        this.stopPolling();
+        this.roomId = null;
+        this.roomRecordId = null;
+        this.isHost = false;
+        this.opponentBoard = [];
+        this.opponentScore = 0;
+        this.opponentAlive = true;
+        this.pendingGarbage = 0;
+        this.lastAttackSent = 0;
+    }
+}
+
+// =========================================================
 // テトリス本体
 // =========================================================
 class Tetris {
@@ -166,6 +341,7 @@ class Tetris {
         this.lockDelayStart = 0;
         this.lockMoveCount = 0;
         this.wasHardDrop = false;
+        this.isSoftDropping = false; // ソフトドロップ中フラグ
 
         this.particles = [];
         this.gameNotification = null;
@@ -174,31 +350,26 @@ class Tetris {
         this.flashEffect = 0;
         this.lineFlashRows = [];
         this.lineFlashAlpha = 0;
-        this.audioEnabled = true; // 音声有効フラグ
+        this.audioEnabled = true;
 
-        // ★ 音声の修正：ファイル名を正しく割り当て
+        // 音声
         this.sounds = {};
         try {
             this.sounds = {
-                line1: new Audio('./sounds/line-clear.mp3'), // 1列消し
-                line4: new Audio('./sounds/four-line-clear.mp3'), // 4列消し
-                all:   new Audio('./sounds/all-clear.mp3'), // 全消し
-                softDrop: new Audio('./sounds/soft-drop.mp3'), // ソフトドロップ
-                hardDrop: new Audio('./sounds/hard-drop.mp3') // ハードドロップ
+                line1: new Audio('./sounds/line-clear.mp3'),
+                line4: new Audio('./sounds/four-line-clear.mp3'),
+                all:   new Audio('./sounds/all-clear.mp3'),
+                hardDrop: new Audio('./sounds/hard-drop.mp3'),
+                land: new Audio('./sounds/soft-drop.mp3') // 着地音として使用
             };
-            this.sounds.hardDrop.volume = 0.25;
-            this.sounds.softDrop.volume = 0.5;
-            Object.values(this.sounds).forEach(s => { 
-                try { 
-                    s.load(); 
-                    s.volume = 0.3; // デフォルト音量
-                } catch (e) { 
-                    console.warn('音声ファイルの読み込みに失敗しました:', e);
-                } 
+            Object.values(this.sounds).forEach(s => {
+                try { s.load(); s.volume = 0.3; } catch (e) { }
             });
+            this.sounds.hardDrop.volume = 0.25;
+            this.sounds.land.volume = 0.4;
         } catch (error) {
-            console.warn('音声システムの初期化に失敗しました:', error);
-            this.sounds = {}; // 音声なしで続行
+            console.warn('音声システム初期化失敗:', error);
+            this.sounds = {};
         }
 
         this.controls = JSON.parse(localStorage.getItem("tetrisControls")) || {
@@ -227,13 +398,21 @@ class Tetris {
             localStorage.setItem('tetrisUserId', this.userId);
         }
 
-        this.multiplayer = new MultiplayerManager(db, this);
+        // マルチプレイ関連
+        this.isMultiplayer = false;
+        this.multiplayerStarted = false;
+        this.multiplayer = new MultiplayerManager(this);
+        this.garbageQueue = 0;  // 自分に溜まっているお邪魔ライン
+        this.attackGauge = 0;   // 攻撃ゲージ（相手に送るライン数表示用）
+        this.lastBoardSendTime = 0;
+        this.comboCount = 0;
+
         this.init();
     }
 
     init() {
         this.setupEventListeners();
-        this.setupMobileControls(); // ★ スマホ操作の設定を追加
+        this.setupMobileControls();
         this.setupHomeScreen();
         this.spawnPiece();
         this.setTheme(this.currentTheme);
@@ -251,19 +430,11 @@ class Tetris {
 
     playSound(sound) {
         if (!sound || !this.audioEnabled) return;
-        try { 
-            sound.currentTime = 0; 
-            const playPromise = sound.play();
-            if (playPromise !== undefined) {
-                playPromise.catch(error => {
-                    console.warn('音声再生エラー:', error);
-                    this.audioEnabled = false;
-                });
-            }
-        } catch (e) { 
-            console.warn('音声再生に失敗しました:', e);
-            this.audioEnabled = false;
-        }
+        try {
+            sound.currentTime = 0;
+            const p = sound.play();
+            if (p !== undefined) p.catch(() => { this.audioEnabled = false; });
+        } catch (e) { this.audioEnabled = false; }
     }
 
     switchScreen(screenId) {
@@ -298,7 +469,7 @@ class Tetris {
         const clicks = {
             'solo-play-button': this.showOpeningScreen,
             'resume-play-button': () => {
-                this.switchScreen('game-screen');
+                this.switchScreen(this.isMultiplayer ? 'battle-screen' : 'game-screen');
                 if (this.isPaused) this.togglePause();
             },
             'ranking-button': this.showRankingScreen,
@@ -308,7 +479,10 @@ class Tetris {
             'back-to-home-from-ranking': this.showHomeScreen,
             'back-to-home-from-opening': this.showHomeScreen,
             'back-to-home-from-settings': this.showHomeScreen,
-            'back-to-home-from-online': this.showHomeScreen,
+            'back-to-home-from-online': () => {
+                this.multiplayer.cleanup();
+                this.showHomeScreen();
+            },
             'easy-mode': () => this.setDifficulty('easy'),
             'normal-mode': () => this.setDifficulty('normal'),
             'hard-mode': () => this.setDifficulty('hard'),
@@ -319,17 +493,34 @@ class Tetris {
                 this.showHomeScreen();
             },
             'save-name-button': () => this.savePlayerName(),
-            // ★ オンライン機能の接続
             'create-room-button': () => this.multiplayer.createRoom(),
             'join-room-button': () => {
-                const code = document.getElementById('room-code-input').value;
-                if(code) this.multiplayer.joinRoom(code);
+                const code = document.getElementById('room-code-input').value.trim();
+                if (code) this.multiplayer.joinRoom(code);
+                else alert('ルームコードを入力してください');
             },
-            'start-button': () => { this.resetGame(); this.startGame(); },
-            'restart-button': () => { this.resetGame(); this.startGame(); },
+            'start-button': () => { this.isMultiplayer = false; this.resetGame(); this.startGame(); },
+            'restart-button': () => { this.isMultiplayer = false; this.resetGame(); this.startGame(); },
             'menu-button': () => {
                 this.isPaused = true;
                 document.getElementById('pause-overlay').classList.remove('hidden');
+                this.showHomeScreen();
+            },
+            'battle-menu-button': () => {
+                this.multiplayer.cleanup();
+                this.isMultiplayer = false;
+                this.multiplayerStarted = false;
+                this.gameRunning = false;
+                this.switchCanvasRefs('solo');
+                this.showHomeScreen();
+            },
+            'battle-result-home': () => {
+                this.multiplayer.cleanup();
+                this.isMultiplayer = false;
+                this.multiplayerStarted = false;
+                this.gameRunning = false;
+                this.switchCanvasRefs('solo');
+                document.getElementById('battle-result-overlay').classList.add('hidden');
                 this.showHomeScreen();
             }
         };
@@ -347,7 +538,104 @@ class Tetris {
         });
     }
 
-    // ★ PCキーボードの入力をシミュレートする関数
+    // ★ キャンバス参照を切り替え
+    switchCanvasRefs(mode) {
+        if (mode === 'battle') {
+            this.canvas = document.getElementById('b-game-canvas');
+            this.ctx = this.canvas.getContext('2d');
+            this.nextCanvas = document.getElementById('b-next-canvas');
+            this.nextCtx = this.nextCanvas.getContext('2d');
+            this.holdCanvas = document.getElementById('b-hold-canvas');
+            this.holdCtx = this.holdCanvas.getContext('2d');
+        } else {
+            this.canvas = document.getElementById('game-canvas');
+            this.ctx = this.canvas.getContext('2d');
+            this.nextCanvas = document.getElementById('next-canvas');
+            this.nextCtx = this.nextCanvas.getContext('2d');
+            this.holdCanvas = document.getElementById('hold-canvas');
+            this.holdCtx = this.holdCanvas.getContext('2d');
+        }
+    }
+
+    // ★ マルチプレイヤーゲーム開始
+    startMultiplayerGame() {
+        if (this.multiplayerStarted) return;
+        this.multiplayerStarted = true;
+        this.isMultiplayer = true;
+        this.switchCanvasRefs('battle');
+        this.setupBattleMobileControls();
+        this.resetGame();
+        this.switchScreen('battle-screen');
+        this.garbageQueue = 0;
+        this.attackGauge = 0;
+        this.comboCount = 0;
+        this.multiplayer.pendingGarbage = 0;
+        this.multiplayer.lastAttackSent = 0;
+
+        // 対戦UI初期化
+        const nameEl = document.getElementById('battle-opponent-name');
+        if (nameEl) nameEl.textContent = '対戦相手';
+        const myNameEl = document.getElementById('battle-my-name');
+        if (myNameEl) myNameEl.textContent = this.playerName;
+        document.getElementById('battle-my-score').textContent = '0';
+        document.getElementById('battle-opp-score').textContent = '0';
+        document.getElementById('garbage-count').textContent = '0';
+        document.getElementById('attack-count').textContent = '0';
+        document.getElementById('battle-result-overlay').classList.add('hidden');
+
+        this.gameRunning = true;
+        this.isPaused = false;
+        this.gameStartTime = this.dropTime = Date.now();
+        this.setDifficulty(this.difficulty);
+        this.updateDisplay();
+        this.gameLoop();
+    }
+
+    // 対戦用モバイルコントロール設定
+    setupBattleMobileControls() {
+        const mBtns = {
+            'bm-left': this.controls.left,
+            'bm-right': this.controls.right,
+            'bm-down': this.controls.down,
+            'bm-up': this.controls.rotateRight,
+            'bm-drop': this.controls.hardDrop,
+            'bm-hold': this.controls.hold
+        };
+        Object.keys(mBtns).forEach(btnId => {
+            const btn = document.getElementById(btnId);
+            if (!btn) return;
+            btn.addEventListener('touchstart', (e) => { e.preventDefault(); this.simulateKeyDown(mBtns[btnId]); }, { passive: false });
+            btn.addEventListener('touchend', (e) => { e.preventDefault(); this.simulateKeyUp(mBtns[btnId]); }, { passive: false });
+            btn.addEventListener('mousedown', () => this.simulateKeyDown(mBtns[btnId]));
+            btn.addEventListener('mouseup', () => this.simulateKeyUp(mBtns[btnId]));
+            btn.addEventListener('mouseleave', () => this.simulateKeyUp(mBtns[btnId]));
+        });
+    }
+
+    // マルチプレイ結果表示
+    showMultiplayerResult(isWinner, room) {
+        this.gameRunning = false;
+        Object.keys(this.activeTimers).forEach(k => { clearTimeout(this.activeTimers[k]); clearInterval(this.activeTimers[k]); });
+        this.activeTimers = {}; this.keyStates = {};
+
+        const overlay = document.getElementById('battle-result-overlay');
+        const titleEl = document.getElementById('battle-result-title');
+        const msgEl = document.getElementById('battle-result-message');
+
+        if (isWinner) {
+            titleEl.textContent = '🎉 WIN!';
+            titleEl.style.color = '#00ff88';
+            msgEl.textContent = 'あなたの勝利です！';
+        } else {
+            titleEl.textContent = '💀 LOSE';
+            titleEl.style.color = '#ff4444';
+            msgEl.textContent = '相手の勝ちです...';
+        }
+        overlay.classList.remove('hidden');
+        this.multiplayer.stopPolling();
+    }
+
+    // ★ PCキーボードシミュレート
     simulateKeyDown(code) {
         if (!this.gameRunning || this.isPaused) return;
         if (!this.keyStates[code]) {
@@ -368,9 +656,10 @@ class Tetris {
         delete this.activeTimers[code];
         if (code === this.controls.hardDrop) this.keyStates['hardDrop_fired'] = false;
         if (code === this.controls.hold || code === 'ControlRight' || code === 'KeyC') this.keyStates['hold_fired'] = false;
+        // ソフトドロップ解除
+        if (code === this.controls.down) this.isSoftDropping = false;
     }
 
-    // ★ スマホ操作のイベントを割り当て
     setupMobileControls() {
         const mBtns = {
             'm-left': this.controls.left,
@@ -380,25 +669,14 @@ class Tetris {
             'm-drop': this.controls.hardDrop,
             'm-hold': this.controls.hold
         };
-
         Object.keys(mBtns).forEach(btnId => {
             const btn = document.getElementById(btnId);
             if (!btn) return;
-
-            btn.addEventListener('touchstart', (e) => {
-                e.preventDefault();
-                this.simulateKeyDown(mBtns[btnId]);
-            }, {passive: false});
-
-            btn.addEventListener('touchend', (e) => {
-                e.preventDefault();
-                this.simulateKeyUp(mBtns[btnId]);
-            }, {passive: false});
-
-            // マウスでもテストできるように
-            btn.addEventListener('mousedown', (e) => this.simulateKeyDown(mBtns[btnId]));
-            btn.addEventListener('mouseup', (e) => this.simulateKeyUp(mBtns[btnId]));
-            btn.addEventListener('mouseleave', (e) => this.simulateKeyUp(mBtns[btnId]));
+            btn.addEventListener('touchstart', (e) => { e.preventDefault(); this.simulateKeyDown(mBtns[btnId]); }, { passive: false });
+            btn.addEventListener('touchend', (e) => { e.preventDefault(); this.simulateKeyUp(mBtns[btnId]); }, { passive: false });
+            btn.addEventListener('mousedown', () => this.simulateKeyDown(mBtns[btnId]));
+            btn.addEventListener('mouseup', () => this.simulateKeyUp(mBtns[btnId]));
+            btn.addEventListener('mouseleave', () => this.simulateKeyUp(mBtns[btnId]));
         });
     }
 
@@ -421,7 +699,11 @@ class Tetris {
     executeKeyAction(code) {
         if (code === this.controls.left)  { this.movePiece(-1, 0); this.lastAction = 'move'; }
         if (code === this.controls.right) { this.movePiece(1, 0);  this.lastAction = 'move'; }
-        if (code === this.controls.down)  { this.movePiece(0, 1);  this.lastAction = 'move'; }
+        if (code === this.controls.down)  {
+            this.isSoftDropping = true;
+            this.movePiece(0, 1);
+            this.lastAction = 'move';
+        }
         if (code === this.controls.rotateRight) this.tryRotateWithWallKick("right");
         if (code === this.controls.rotateLeft)  this.tryRotateWithWallKick("left");
         if (code === this.controls.hardDrop && !this.keyStates['hardDrop_fired']) {
@@ -432,7 +714,9 @@ class Tetris {
         }
     }
 
-    // ランキング
+    // =========================================================
+    // ランキング (RESTful Table API)
+    // =========================================================
     async fetchRanking() {
         const loadingHtml = '<p style="color:#888;font-size:0.85rem;text-align:center;padding:10px">読み込み中...</p>';
         ['home-ranking-list', 'ranking-list', 'game-over-ranking-list'].forEach(id => {
@@ -440,47 +724,99 @@ class Tetris {
             if (el && el.innerHTML === '') el.innerHTML = loadingHtml;
         });
 
-        if (!db) {
-            const local = JSON.parse(localStorage.getItem('tetrisOfflineRanking') || '[]');
-            this.updateRankingUI(local);
-            return;
-        }
         try {
-            const snap = await db.collection("tetris_ranking").orderBy("score", "desc").limit(10).get();
-            const ranking = [];
-            snap.forEach(doc => ranking.push(doc.data()));
-            this.updateRankingUI(ranking);
+            const res = await API.get('tetris_ranking', { sort: '-score', limit: 10 });
+            const data = (res.data || []).map(r => ({
+                playerName: r.playerName || 'Player',
+                score: r.score || 0,
+                userId: r.userId || ''
+            }));
+            // ローカルのハイスコアも含める
+            const local = this.getLocalRanking();
+            const merged = this.mergeRankingLists(data, local);
+            this.updateRankingUI(merged);
         } catch (e) {
-            console.error("Ranking fetch error", e);
-            const local = JSON.parse(localStorage.getItem('tetrisOfflineRanking') || '[]');
+            console.warn("Ranking fetch error", e);
+            const local = this.getLocalRanking();
             this.updateRankingUI(local);
         }
     }
 
     async saveRanking() {
-        if (!db) {
-            if (this.score <= 0) return;
-            let local = JSON.parse(localStorage.getItem('tetrisOfflineRanking') || '[]');
-            const existing = local.findIndex(r => r.userId === this.userId);
-            if (existing >= 0) {
-                if (local[existing].score < this.score) local[existing] = { playerName: this.playerName, score: this.score, userId: this.userId };
-            } else {
-                local.push({ playerName: this.playerName, score: this.score, userId: this.userId });
-            }
-            local.sort((a, b) => b.score - a.score);
-            local = local.slice(0, 10);
-            localStorage.setItem('tetrisOfflineRanking', JSON.stringify(local));
-            this.fetchRanking();
-            return;
-        }
+        this.saveOfflineRanking();
+        if (this.score <= 0) return;
         try {
-            const ref = db.collection("tetris_ranking").doc(this.userId);
-            const snap = await ref.get();
-            if (!snap.exists || snap.data().score < this.score) {
-                await ref.set({ playerName: this.playerName, score: this.score, timestamp: firebase.firestore.FieldValue.serverTimestamp() });
+            // 自分の既存レコードを検索
+            const res = await API.get('tetris_ranking', { search: this.userId, limit: 10 });
+            const existing = (res.data || []).find(r => r.userId === this.userId);
+            if (existing) {
+                if (existing.score < this.score) {
+                    await API.patch('tetris_ranking', existing.id, {
+                        playerName: this.playerName,
+                        score: this.score
+                    });
+                }
+            } else {
+                await API.post('tetris_ranking', {
+                    userId: this.userId,
+                    playerName: this.playerName,
+                    score: this.score
+                });
             }
             this.fetchRanking();
-        } catch (e) { console.error("Ranking save error", e); }
+        } catch (e) {
+            console.error("Ranking save error", e);
+        }
+    }
+
+    saveOfflineRanking() {
+        if (this.score <= 0) return;
+        let local = this.getLocalRanking();
+        const existing = local.findIndex(r => r.userId === this.userId);
+        if (existing >= 0) {
+            if (local[existing].score < this.score) local[existing] = { playerName: this.playerName, score: this.score, userId: this.userId };
+        } else {
+            local.push({ playerName: this.playerName, score: this.score, userId: this.userId });
+        }
+        local = this.sortAndLimitRanking(local);
+        localStorage.setItem('tetrisOfflineRanking', JSON.stringify(local));
+        return true;
+    }
+
+    getLocalRanking() {
+        const local = JSON.parse(localStorage.getItem('tetrisOfflineRanking') || '[]')
+            .map((entry, idx) => this.normalizeRankingEntry(entry, `local_${idx}`))
+            .filter(Boolean);
+        const highScore = Number(localStorage.getItem('tetrisHighScore') || '0');
+        if (highScore > 0 && !local.some(r => r.userId === this.userId && r.score >= highScore)) {
+            local.push({ playerName: this.playerName || 'Player', score: highScore, userId: this.userId || 'local_player' });
+        }
+        return this.sortAndLimitRanking(local);
+    }
+
+    mergeRankingLists(primary, secondary) {
+        const byKey = new Map();
+        [...(primary || []), ...(secondary || [])].forEach(entry => {
+            const n = this.normalizeRankingEntry(entry);
+            if (!n) return;
+            const key = n.userId || `${n.playerName}_${n.score}`;
+            const existing = byKey.get(key);
+            if (!existing || existing.score < n.score) byKey.set(key, n);
+        });
+        const merged = [];
+        byKey.forEach(v => merged.push(v));
+        return this.sortAndLimitRanking(merged);
+    }
+
+    normalizeRankingEntry(entry, fallbackId = '') {
+        if (!entry) return null;
+        const score = Number(entry.score);
+        if (!Number.isFinite(score) || score <= 0) return null;
+        return { playerName: String(entry.playerName || entry.name || 'Player'), score, userId: entry.userId || fallbackId };
+    }
+
+    sortAndLimitRanking(data) {
+        return (data || []).filter(Boolean).sort((a, b) => b.score - a.score).slice(0, 10);
     }
 
     updateRankingUI(data) {
@@ -496,7 +832,7 @@ class Tetris {
             data.forEach((d, i) => {
                 const cls = i < 3 ? `rank-${i + 1}` : '';
                 const label = i < 3 ? medals[i] : `${i + 1}`;
-                const safe = (d.playerName || 'Player').replace(/[&<>'"]/g, t => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[t] || t));
+                const safe = (d.playerName || 'Player').replace(/[&<>'"]/g, t => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[t] || t));
                 html += `<div class="ranking-item ${cls}">
                     <span class="ranking-rank">${label}</span>
                     <span class="ranking-name">${safe}</span>
@@ -534,7 +870,7 @@ class Tetris {
             document.removeEventListener('keydown', handle);
             this.showNotification(`✓ キー設定: ${name}`);
             this.updateControlsDisplay();
-            this.setupMobileControls(); // 設定が変わったらスマホボタンも再マッピング
+            this.setupMobileControls();
         };
         document.addEventListener('keydown', handle);
         setTimeout(() => {
@@ -545,20 +881,20 @@ class Tetris {
     }
 
     getKeyDisplayName(key) {
-        const m = { ArrowLeft:'←', ArrowRight:'→', ArrowUp:'↑', ArrowDown:'↓', Space:'Space', ControlLeft:'Ctrl', ControlRight:'Ctrl', AltLeft:'Alt', AltRight:'Alt', KeyP:'P' };
-        return m[key] || (key ? key.replace('Key','').replace('Digit','') : '?');
+        const m = { ArrowLeft: '←', ArrowRight: '→', ArrowUp: '↑', ArrowDown: '↓', Space: 'Space', ControlLeft: 'Ctrl', ControlRight: 'Ctrl', AltLeft: 'Alt', AltRight: 'Alt', KeyP: 'P' };
+        return m[key] || (key ? key.replace('Key', '').replace('Digit', '') : '?');
     }
 
     updateControlsDisplay() {
         if (!document.getElementById('key-disp-move')) return;
         const g = k => this.getKeyDisplayName(this.controls[k]);
-        document.getElementById('key-disp-move').textContent     = `${g('left')}/${g('right')}`;
+        document.getElementById('key-disp-move').textContent = `${g('left')}/${g('right')}`;
         document.getElementById('key-disp-rotateRight').textContent = g('rotateRight');
-        document.getElementById('key-disp-rotateLeft').textContent  = g('rotateLeft');
-        document.getElementById('key-disp-down').textContent     = g('down');
-        document.getElementById('key-disp-hardDrop').textContent  = g('hardDrop');
-        document.getElementById('key-disp-hold').textContent     = g('hold');
-        document.getElementById('key-disp-pause').textContent    = g('pause');
+        document.getElementById('key-disp-rotateLeft').textContent = g('rotateLeft');
+        document.getElementById('key-disp-down').textContent = g('down');
+        document.getElementById('key-disp-hardDrop').textContent = g('hardDrop');
+        document.getElementById('key-disp-hold').textContent = g('hold');
+        document.getElementById('key-disp-pause').textContent = g('pause');
     }
 
     showNotification(message) {
@@ -585,7 +921,7 @@ class Tetris {
         document.querySelectorAll('.difficulty-button').forEach(b => b.classList.remove('active'));
         const el = document.getElementById(`${this.difficulty || 'normal'}-mode`);
         if (el) el.classList.add('active');
-        const descs = { easy:'ゆっくりとした速度で、初心者でも遊びやすくなっています。', normal:'標準的な速度でプレイできます。', hard:'高速で落下し、上級者向けの難易度です。' };
+        const descs = { easy: 'ゆっくりとした速度で、初心者でも遊びやすくなっています。', normal: '標準的な速度でプレイできます。', hard: '高速で落下し、上級者向けの難易度です。' };
         const d = document.getElementById('difficulty-description');
         if (d) d.textContent = descs[this.difficulty] || '';
     }
@@ -621,11 +957,13 @@ class Tetris {
     }
 
     startGame() {
+        this.switchCanvasRefs('solo');
         this.switchScreen('game-screen');
         document.getElementById('game-over').classList.add('hidden');
         document.getElementById('pause-overlay').classList.add('hidden');
         this.gameRunning = true; this.isPaused = false;
         this.gameStartTime = this.dropTime = Date.now();
+        this.comboCount = 0;
         this.setDifficulty(this.difficulty);
         this.updateDisplay();
         this.gameLoop();
@@ -646,22 +984,26 @@ class Tetris {
         this.lockDelayStart = 0; this.lockMoveCount = 0;
         this.screenShake = 0; this.flashEffect = 0;
         this.gameNotification = null;
+        this.garbageQueue = 0;
+        this.attackGauge = 0;
+        this.comboCount = 0;
+        this.isSoftDropping = false;
         this.drawHoldCanvas(); this.spawnPiece(); this.updateDisplay();
     }
 
     PIECES = {
-        I: { shape: [[0,0,0,0],[1,1,1,1],[0,0,0,0],[0,0,0,0]], color: '#00f5ff' },
-        O: { shape: [[1,1],[1,1]],                              color: '#f5f500' },
-        T: { shape: [[0,1,0],[1,1,1]],                         color: '#d400ff' },
-        S: { shape: [[0,1,1],[1,1,0]],                         color: '#00e500' },
-        Z: { shape: [[1,1,0],[0,1,1]],                         color: '#ff2020' },
-        J: { shape: [[1,0,0],[1,1,1]],                         color: '#3366ff' },
-        L: { shape: [[0,0,1],[1,1,1]],                         color: '#ff8c00' }
+        I: { shape: [[0, 0, 0, 0], [1, 1, 1, 1], [0, 0, 0, 0], [0, 0, 0, 0]], color: '#00f5ff' },
+        O: { shape: [[1, 1], [1, 1]], color: '#f5f500' },
+        T: { shape: [[0, 1, 0], [1, 1, 1]], color: '#d400ff' },
+        S: { shape: [[0, 1, 1], [1, 1, 0]], color: '#00e500' },
+        Z: { shape: [[1, 1, 0], [0, 1, 1]], color: '#ff2020' },
+        J: { shape: [[1, 0, 0], [1, 1, 1]], color: '#3366ff' },
+        L: { shape: [[0, 0, 1], [1, 1, 1]], color: '#ff8c00' }
     };
 
     generateNextPiece() {
         if (this.bag.length === 0) {
-            this.bag = ["I","O","T","S","Z","J","L"];
+            this.bag = ["I", "O", "T", "S", "Z", "J", "L"];
             for (let i = this.bag.length - 1; i > 0; i--) {
                 const j = Math.floor(Math.random() * (i + 1));
                 [this.bag[i], this.bag[j]] = [this.bag[j], this.bag[i]];
@@ -683,6 +1025,7 @@ class Tetris {
         this.lockDelayStart = 0;
         this.lockMoveCount = 0;
         this.wasHardDrop = false;
+        this.isSoftDropping = false;
         if (this.checkCollisionWith(this.currentPiece)) this.gameOver();
     }
 
@@ -690,20 +1033,6 @@ class Tetris {
         if (!this.checkCollisionWith({ ...this.currentPiece, x: this.currentPiece.x + dx, y: this.currentPiece.y + dy })) {
             this.currentPiece.x += dx;
             this.currentPiece.y += dy;
-            
-            // ソフトドロップ音（下移動時）
-            if (dy > 0) {
-                try {
-                    const audio = new Audio('sounds/soft-drop.mp3');
-                    audio.volume = 0.2;
-                    audio.play().catch(error => {
-                        console.warn('ソフトドロップ音の再生に失敗しました:', error);
-                    });
-                } catch (error) {
-                    console.warn('ソフトドロップ音の設定に失敗しました:', error);
-                }
-            }
-            
             if (dx !== 0 && this.lockDelayStart > 0 && this.lockMoveCount < this.MAX_LOCK_RESETS) {
                 this.lockDelayStart = Date.now();
                 this.lockMoveCount++;
@@ -713,11 +1042,11 @@ class Tetris {
         return false;
     }
 
-    rotateMatrix(m)    { return m[0].map((_, i) => m.map(r => r[i]).reverse()); }
+    rotateMatrix(m) { return m[0].map((_, i) => m.map(r => r[i]).reverse()); }
     rotateMatrixCCW(m) { return m[0].map((_, i) => m.map(r => r[r.length - 1 - i])); }
 
     tryRotateWithWallKick(dir = "right") {
-        const kicks = [{x:0,y:0},{x:-1,y:0},{x:1,y:0},{x:-2,y:0},{x:2,y:0},{x:0,y:-1},{x:0,y:-2}];
+        const kicks = [{ x: 0, y: 0 }, { x: -1, y: 0 }, { x: 1, y: 0 }, { x: -2, y: 0 }, { x: 2, y: 0 }, { x: 0, y: -1 }, { x: 0, y: -2 }];
         const rotated = dir === "left" ? this.rotateMatrixCCW(this.currentPiece.shape) : this.rotateMatrix(this.currentPiece.shape);
         const ox = this.currentPiece.x, oy = this.currentPiece.y;
         for (let k of kicks) {
@@ -756,7 +1085,7 @@ class Tetris {
         }
         this.currentPiece.y = endY;
         this.wasHardDrop = true;
-        this.screenShake = 2; // ★ 揺れを小さく（旧6）
+        this.screenShake = 2;
         this.playSound(this.sounds.hardDrop);
         this.lockPiece();
     }
@@ -787,6 +1116,7 @@ class Tetris {
 
     lockPiece() {
         const wasHard = this.wasHardDrop;
+        const wasSoft = this.isSoftDropping;
         this.wasHardDrop = false;
         this.lockDelayStart = 0;
         this.lockMoveCount = 0;
@@ -799,17 +1129,52 @@ class Tetris {
             });
         });
 
-        if (!wasHard) this.playSound(this.sounds.softDrop);
+        // ★ 着地音の修正:
+        // - ハードドロップ時は hardDrop音（既に再生済み）
+        // - ソフトドロップ中は音を鳴らさない
+        // - 自然落下での着地のみ着地音を再生
+        if (!wasHard && !wasSoft) {
+            this.playSound(this.sounds.land);
+        }
 
         this.clearLines();
+
+        // マルチプレイ: お邪魔ラインを受け取る
+        if (this.isMultiplayer) {
+            const garbage = this.multiplayer.consumeGarbage();
+            if (garbage > 0) {
+                this.addGarbageLines(garbage);
+            }
+        }
+
         this.spawnPiece();
+
+        // マルチプレイ: ボード状態を送信（節流: 200ms間隔）
+        if (this.isMultiplayer && Date.now() - this.lastBoardSendTime > 200) {
+            this.lastBoardSendTime = Date.now();
+            this.multiplayer.sendUpdate(this.board, this.score);
+        }
+    }
+
+    // ★ お邪魔ライン追加
+    addGarbageLines(count) {
+        for (let i = 0; i < count; i++) {
+            // 一番上の行を削除
+            this.board.shift();
+            // 下にお邪魔行を追加（1箇所だけ穴を空ける）
+            const garbageLine = new Array(this.BOARD_WIDTH).fill('#888888');
+            const hole = Math.floor(Math.random() * this.BOARD_WIDTH);
+            garbageLine[hole] = 0;
+            this.board.push(garbageLine);
+        }
+        this.garbageQueue = 0;
     }
 
     checkTSpin() {
         if (this.currentPiece.type !== 'T' || this.lastAction !== 'rotate') return false;
         let corners = 0;
         const px = this.currentPiece.x, py = this.currentPiece.y;
-        for (let [cx, cy] of [[0,0],[0,2],[2,0],[2,2]]) {
+        for (let [cx, cy] of [[0, 0], [0, 2], [2, 0], [2, 2]]) {
             const bx = px + cx, by = py + cy;
             if (bx < 0 || bx >= this.BOARD_WIDTH || by >= this.BOARD_HEIGHT || (by >= 0 && this.board[by][bx])) corners++;
         }
@@ -825,6 +1190,16 @@ class Tetris {
             for (let i = 0; i < 3; i++) this.particles.push(new Particle(cx, cy, '#ffffff', 'spark'));
             this.particles.push(new Particle(cx, cy, color, 'spark'));
         }
+    }
+
+    // ★ 攻撃ライン数の計算
+    calculateAttackLines(cleared, isTSpin) {
+        if (isTSpin) {
+            // T-Spin: 0行=0, 1行=2, 2行=4, 3行=6
+            return [0, 2, 4, 6][Math.min(cleared, 3)];
+        }
+        // 通常: 1行=0, 2行=1, 3行=2, 4行=4
+        return [0, 0, 1, 2, 4][Math.min(cleared, 4)];
     }
 
     clearLines() {
@@ -854,11 +1229,14 @@ class Tetris {
         if (cleared === 0 && isTSpin) {
             this.score += 400 * this.level;
             this.showGameNotification('T-Spin!', '#d400ff');
+            this.comboCount = 0;
             this.updateDisplay(); return;
         }
 
         if (cleared > 0) {
-            // ★ 消去数に応じた音声の呼び出し
+            this.comboCount++;
+
+            // 音声
             const sound = cleared >= 4 ? this.sounds.line4 : (cleared === 1 ? this.sounds.line1 : this.sounds.all);
             if (sound) this.playSound(sound);
 
@@ -871,16 +1249,16 @@ class Tetris {
 
             if (isTSpin) {
                 baseScore = [0, 800, 1200, 1600][Math.min(cleared, 3)];
-                this.showGameNotification(`T-Spin ${['','Single','Double','Triple'][Math.min(cleared,3)]}!`, '#d400ff');
+                this.showGameNotification(`T-Spin ${['', 'Single', 'Double', 'Triple'][Math.min(cleared, 3)]}!`, '#d400ff');
             } else if (cleared >= 4) {
                 this.showGameNotification('★ TETRIS!! ★', '#00f5ff');
                 this.flashEffect = 1.0;
-                this.screenShake = 4; // ★ 揺れを小さく（旧10）
+                this.screenShake = 4;
                 for (let i = 0; i < 60; i++) {
                     this.particles.push(new Particle(
                         Math.random() * this.canvas.width,
                         Math.random() * this.canvas.height,
-                        ['#00f5ff','#ff00ff','#ffff00','#00ff88','#ff6600'][Math.floor(Math.random()*5)],
+                        ['#00f5ff', '#ff00ff', '#ffff00', '#00ff88', '#ff6600'][Math.floor(Math.random() * 5)],
                         'spark'
                     ));
                 }
@@ -890,11 +1268,47 @@ class Tetris {
                 this.showGameNotification('Double!', '#00ff88');
             }
 
+            // コンボボーナス
+            if (this.comboCount > 1) {
+                baseScore += 50 * this.comboCount * this.level;
+                if (this.comboCount >= 3) {
+                    this.showGameNotification(`${this.comboCount} Combo!`, '#ff6600');
+                }
+            }
+
             this.score += Math.floor(baseScore * this.level * mult);
             this.level = Math.floor(this.lines / 10) + 1;
             const base = { easy: 1200, normal: 1000, hard: 700 }[this.difficulty] || 1000;
             this.dropInterval = Math.max(50, base - (this.level - 1) * 50);
+
+            // ★ マルチプレイ: 攻撃送信 & 相殺
+            if (this.isMultiplayer) {
+                let attackLines = this.calculateAttackLines(cleared, isTSpin);
+                // コンボボーナス攻撃
+                if (this.comboCount > 1) attackLines += Math.floor(this.comboCount / 2);
+
+                // 相殺 (カウンター): まず自分の受けるお邪魔を攻撃力で相殺
+                attackLines = this.multiplayer.cancelGarbage(attackLines);
+
+                if (attackLines > 0) {
+                    this.multiplayer.sendAttack(attackLines);
+                    this.attackGauge = attackLines;
+                    this.showGameNotification(`⚡ ${attackLines}ライン攻撃!`, '#ff6600');
+                    // 攻撃ゲージUI更新
+                    const atkEl = document.getElementById('attack-count');
+                    if (atkEl) atkEl.textContent = attackLines;
+                } else if (this.multiplayer.pendingGarbage === 0 && this.calculateAttackLines(cleared, isTSpin) > 0) {
+                    this.showGameNotification('🛡️ 相殺!', '#00ccff');
+                }
+
+                // お邪魔ライン受信UI更新
+                const garbEl = document.getElementById('garbage-count');
+                if (garbEl) garbEl.textContent = this.multiplayer.pendingGarbage;
+            }
+
             this.updateDisplay();
+        } else {
+            this.comboCount = 0;
         }
     }
 
@@ -917,8 +1331,59 @@ class Tetris {
             this.lockPiece();
         }
 
+        // マルチプレイ: お邪魔ライン受信表示更新
+        if (this.isMultiplayer) {
+            const garbEl = document.getElementById('garbage-count');
+            if (garbEl) garbEl.textContent = this.multiplayer.pendingGarbage;
+            const scoreEl = document.getElementById('battle-my-score');
+            if (scoreEl) scoreEl.textContent = this.score.toLocaleString();
+            const oppScoreEl = document.getElementById('battle-opp-score');
+            if (oppScoreEl) oppScoreEl.textContent = this.multiplayer.opponentScore.toLocaleString();
+        }
+
         this.draw();
+
+        // マルチプレイ: 相手のボードを描画
+        if (this.isMultiplayer) {
+            this.drawOpponentBoard();
+        }
+
         requestAnimationFrame(() => this.gameLoop());
+    }
+
+    // ★ 相手のボード描画
+    drawOpponentBoard() {
+        const canvas = document.getElementById('opponent-canvas');
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        const bs = 12; // 小さいブロックサイズ
+        ctx.fillStyle = '#0a0a1a';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // グリッド
+        ctx.strokeStyle = 'rgba(255,255,255,0.03)';
+        ctx.lineWidth = 0.5;
+        for (let x = 0; x <= 10; x++) {
+            ctx.beginPath(); ctx.moveTo(x * bs, 0); ctx.lineTo(x * bs, 20 * bs); ctx.stroke();
+        }
+        for (let y = 0; y <= 20; y++) {
+            ctx.beginPath(); ctx.moveTo(0, y * bs); ctx.lineTo(10 * bs, y * bs); ctx.stroke();
+        }
+
+        const board = this.multiplayer.opponentBoard;
+        if (!board || !Array.isArray(board) || board.length === 0) return;
+
+        for (let y = 0; y < Math.min(board.length, 20); y++) {
+            if (!board[y]) continue;
+            for (let x = 0; x < Math.min(board[y].length, 10); x++) {
+                if (board[y][x]) {
+                    ctx.fillStyle = typeof board[y][x] === 'string' ? board[y][x] : '#666';
+                    ctx.fillRect(x * bs + 1, y * bs + 1, bs - 2, bs - 2);
+                    ctx.fillStyle = 'rgba(255,255,255,0.2)';
+                    ctx.fillRect(x * bs + 1, y * bs + 1, bs - 2, 2);
+                }
+            }
+        }
     }
 
     draw() {
@@ -926,10 +1391,7 @@ class Tetris {
         ctx.save();
 
         if (this.screenShake > 0) {
-            ctx.translate(
-                (Math.random() - 0.5) * this.screenShake,
-                (Math.random() - 0.5) * this.screenShake
-            );
+            ctx.translate((Math.random() - 0.5) * this.screenShake, (Math.random() - 0.5) * this.screenShake);
             this.screenShake *= 0.72;
             if (this.screenShake < 0.5) this.screenShake = 0;
         }
@@ -959,7 +1421,7 @@ class Tetris {
             if (h > 0) {
                 const grad = ctx.createLinearGradient(0, t.startY * this.BLOCK_SIZE, 0, t.endY * this.BLOCK_SIZE);
                 grad.addColorStop(0, `rgba(255,255,255,0)`);
-                grad.addColorStop(0.4, `${t.color}${Math.floor(t.alpha * 80).toString(16).padStart(2,'0')}`);
+                grad.addColorStop(0.4, `${t.color}${Math.floor(t.alpha * 80).toString(16).padStart(2, '0')}`);
                 grad.addColorStop(1, `rgba(255,255,255,${t.alpha * 0.95})`);
                 ctx.fillStyle = grad;
                 ctx.fillRect(t.x * this.BLOCK_SIZE, t.startY * this.BLOCK_SIZE, t.width * this.BLOCK_SIZE, h);
@@ -980,6 +1442,18 @@ class Tetris {
         this.board.forEach((row, y) => row.forEach((color, x) => {
             if (color) this.drawBlock(ctx, x * this.BLOCK_SIZE, y * this.BLOCK_SIZE, this.BLOCK_SIZE, color);
         }));
+
+        // お邪魔ライン警告（受信待ちのお邪魔）
+        if (this.isMultiplayer && this.multiplayer.pendingGarbage > 0) {
+            const garbageCount = Math.min(this.multiplayer.pendingGarbage, 20);
+            ctx.fillStyle = 'rgba(255, 50, 50, 0.3)';
+            const startY = (this.BOARD_HEIGHT - garbageCount) * this.BLOCK_SIZE;
+            ctx.fillRect(0, startY, 4, garbageCount * this.BLOCK_SIZE);
+            // 点滅
+            const blink = Math.sin(Date.now() / 200) * 0.3 + 0.5;
+            ctx.fillStyle = `rgba(255, 0, 0, ${blink})`;
+            ctx.fillRect(0, startY, 4, garbageCount * this.BLOCK_SIZE);
+        }
 
         if (this.currentPiece) {
             const gy = this.getDropY();
@@ -1073,6 +1547,15 @@ class Tetris {
         });
         const h = document.getElementById('high-score-display');
         if (h) h.textContent = this.highScore.toLocaleString();
+        // 対戦画面用
+        if (this.isMultiplayer) {
+            const bLevel = document.getElementById('b-level');
+            if (bLevel) bLevel.textContent = this.level.toLocaleString();
+            const bLines = document.getElementById('b-lines');
+            if (bLines) bLines.textContent = this.lines.toLocaleString();
+            const bScore = document.getElementById('battle-my-score');
+            if (bScore) bScore.textContent = this.score.toLocaleString();
+        }
     }
 
     gameOver() {
@@ -1089,10 +1572,16 @@ class Tetris {
             localStorage.setItem('tetrisHighScore', this.highScore);
         }
 
-        document.getElementById('final-score').textContent     = this.score.toLocaleString();
-        document.getElementById('final-high-score').textContent = this.highScore.toLocaleString();
-        document.getElementById('game-over').classList.remove('hidden');
-        this.saveRanking();
+        if (this.isMultiplayer) {
+            // マルチプレイでの死亡通知
+            this.multiplayer.notifyDeath();
+            this.showMultiplayerResult(false, null);
+        } else {
+            document.getElementById('final-score').textContent = this.score.toLocaleString();
+            document.getElementById('final-high-score').textContent = this.highScore.toLocaleString();
+            document.getElementById('game-over').classList.remove('hidden');
+            this.saveRanking();
+        }
     }
 }
 
