@@ -1,23 +1,30 @@
 // =========================================================
-// Firebase設定
+// Firebase設定（安全な初期化）
 // =========================================================
 let db = null;
-try {
-    const firebaseConfig = {
-        apiKey: "AIzaSyCwRHrb9D-Oqacf174qy6xHCdXmg_mcodg",
-        authDomain: "tetoris-17371.firebaseapp.com",
-        projectId: "tetoris-17371",
-        storageBucket: "tetoris-17371.firebasestorage.app",
-        messagingSenderId: "807363112631",
-        appId: "1:807363112631:web:ac778e812412f98b196732"
-    };
-    if (typeof firebase !== 'undefined') {
-        if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
-        db = firebase.firestore();
+const firebaseConfig = {
+    apiKey: "AIzaSyCwRHrb9D-Oqacf174qy6xHCdXmg_mcodg",
+    authDomain: "tetoris-17371.firebaseapp.com",
+    projectId: "tetoris-17371",
+    storageBucket: "tetoris-17371.firebasestorage.app",
+    messagingSenderId: "807363112631",
+    appId: "1:807363112631:web:ac778e812412f98b196732"
+};
+
+function initFirebase() {
+    try {
+        if (typeof firebase !== 'undefined' && firebase.apps) {
+            if (!firebase.apps.length) {
+                firebase.initializeApp(firebaseConfig);
+            }
+            db = firebase.firestore();
+            console.log("Firebase connected");
+        }
+    } catch (e) {
+        console.warn("Firebase offline mode");
     }
-} catch (e) {
-    console.warn("Firebase init failed. Offline mode.", e);
 }
+initFirebase();
 
 // =========================================================
 // ★ オンライン対戦ベースクラス
@@ -167,18 +174,32 @@ class Tetris {
         this.flashEffect = 0;
         this.lineFlashRows = [];
         this.lineFlashAlpha = 0;
+        this.audioEnabled = true; // 音声有効フラグ
 
         // ★ 音声の修正：ファイル名を正しく割り当て
-        this.sounds = {
-            line1: new Audio('sounds/line-clear.mp3'), // 1列消し
-            line4: new Audio('sounds/four-line-clear.mp3'), // 4列消し
-            all:   new Audio('sounds/all-clear.mp3'), // 全消し
-            softDrop: new Audio('sounds/soft-drop.mp3'), // ソフトドロップ
-            hardDrop: new Audio('sounds/hard-drop.mp3') // ハードドロップ
-        };
-        this.sounds.hardDrop.volume = 0.25;
-        this.sounds.softDrop.volume = 0.5;
-        Object.values(this.sounds).forEach(s => { try { s.load(); } catch (e) { } });
+        this.sounds = {};
+        try {
+            this.sounds = {
+                line1: new Audio('./sounds/line-clear.mp3'), // 1列消し
+                line4: new Audio('./sounds/four-line-clear.mp3'), // 4列消し
+                all:   new Audio('./sounds/all-clear.mp3'), // 全消し
+                softDrop: new Audio('./sounds/soft-drop.mp3'), // ソフトドロップ
+                hardDrop: new Audio('./sounds/hard-drop.mp3') // ハードドロップ
+            };
+            this.sounds.hardDrop.volume = 0.25;
+            this.sounds.softDrop.volume = 0.5;
+            Object.values(this.sounds).forEach(s => { 
+                try { 
+                    s.load(); 
+                    s.volume = 0.3; // デフォルト音量
+                } catch (e) { 
+                    console.warn('音声ファイルの読み込みに失敗しました:', e);
+                } 
+            });
+        } catch (error) {
+            console.warn('音声システムの初期化に失敗しました:', error);
+            this.sounds = {}; // 音声なしで続行
+        }
 
         this.controls = JSON.parse(localStorage.getItem("tetrisControls")) || {
             left: "ArrowLeft", right: "ArrowRight", down: "ArrowDown",
@@ -229,8 +250,20 @@ class Tetris {
     }
 
     playSound(sound) {
-        if (!sound) return;
-        try { sound.currentTime = 0; sound.play().catch(() => { }); } catch (e) { }
+        if (!sound || !this.audioEnabled) return;
+        try { 
+            sound.currentTime = 0; 
+            const playPromise = sound.play();
+            if (playPromise !== undefined) {
+                playPromise.catch(error => {
+                    console.warn('音声再生エラー:', error);
+                    this.audioEnabled = false;
+                });
+            }
+        } catch (e) { 
+            console.warn('音声再生に失敗しました:', e);
+            this.audioEnabled = false;
+        }
     }
 
     switchScreen(screenId) {
@@ -1063,6 +1096,15 @@ class Tetris {
     }
 }
 
-window.onload = function() {
+function bootTetris() {
+    if (window.__tetrisBooted) return;
+    window.__tetrisBooted = true;
     new Tetris();
-};
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', bootTetris);
+    window.addEventListener('load', bootTetris);
+} else {
+    bootTetris();
+}
