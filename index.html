@@ -3,12 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <base href="./">
     <title>テトリス - Tetris Game</title>
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="./style.css">
     <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;700;900&family=Noto+Sans+JP:wght@300;400;500;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <script src="https://www.gstatic.com/firebasejs/10.8.1/firebase-app-compat.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore-compat.js"></script>
 </head>
 <body class="theme-dark">
 
@@ -323,6 +322,104 @@
         </div>
     </div>
 
-    <script src="game.js"></script>
+    <!-- ★ 対戦画面 -->
+    <div id="battle-screen" class="screen">
+        <div class="battle-container">
+            <div class="battle-header">
+                <button id="battle-menu-button" class="menu-button"><i class="fas fa-bars"></i> 退出</button>
+                <div class="battle-title-bar">
+                    <span class="battle-player-name" id="battle-my-name">あなた</span>
+                    <span class="battle-vs">VS</span>
+                    <span class="battle-player-name" id="battle-opponent-name">対戦相手</span>
+                </div>
+                <div style="width:80px"></div>
+            </div>
+
+            <div class="battle-content">
+                <!-- 左: 自分の情報 -->
+                <div class="battle-side-panel battle-my-panel">
+                    <div class="hold-section">
+                        <div class="panel-title">HOLD</div>
+                        <canvas id="b-hold-canvas" width="84" height="84"></canvas>
+                    </div>
+                    <div class="battle-stats">
+                        <div class="battle-stat">
+                            <span class="stat-label">SCORE</span>
+                            <span class="stat-value" id="battle-my-score">0</span>
+                        </div>
+                        <div class="battle-stat">
+                            <span class="stat-label">LEVEL</span>
+                            <span class="stat-value" id="b-level">1</span>
+                        </div>
+                        <div class="battle-stat">
+                            <span class="stat-label">LINES</span>
+                            <span class="stat-value" id="b-lines">0</span>
+                        </div>
+                    </div>
+                    <div class="battle-gauge-section">
+                        <div class="gauge-item danger">
+                            <i class="fas fa-skull-crossbones"></i>
+                            <span>受信</span>
+                            <span class="gauge-value" id="garbage-count">0</span>
+                        </div>
+                        <div class="gauge-item attack">
+                            <i class="fas fa-bolt"></i>
+                            <span>攻撃</span>
+                            <span class="gauge-value" id="attack-count">0</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 中央: 自分のゲームボード -->
+                <div class="battle-center">
+                    <canvas id="b-game-canvas" width="300" height="600"></canvas>
+                </div>
+
+                <!-- 右: 相手のボード -->
+                <div class="battle-opponent-side">
+                    <div class="next-section">
+                        <div class="panel-title">NEXT</div>
+                        <canvas id="b-next-canvas" width="84" height="84"></canvas>
+                    </div>
+                    <div class="opponent-board-section">
+                        <div class="panel-title">OPPONENT</div>
+                        <canvas id="opponent-canvas" width="120" height="240"></canvas>
+                        <div class="opp-score-display">
+                            <span>SCORE: </span><span id="battle-opp-score">0</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 対戦結果オーバーレイ -->
+            <div id="battle-result-overlay" class="battle-result-overlay hidden">
+                <div class="battle-result-content">
+                    <h2 id="battle-result-title">🎉 WIN!</h2>
+                    <p id="battle-result-message">あなたの勝利です！</p>
+                    <button id="battle-result-home" class="home-button primary">
+                        <i class="fas fa-home"></i> ホームへ
+                    </button>
+                </div>
+            </div>
+
+            <!-- モバイルコントロール(対戦用) -->
+            <div class="mobile-controls" id="battle-mobile-controls">
+                <div class="m-row">
+                    <button class="m-btn m-btn-small" id="bm-hold">HOLD</button>
+                    <button class="m-btn m-btn-small" id="bm-up">↻</button>
+                </div>
+                <div class="m-row">
+                    <button class="m-btn" id="bm-left">←</button>
+                    <button class="m-btn" id="bm-down">↓</button>
+                    <button class="m-btn" id="bm-right">→</button>
+                </div>
+                <div class="m-row">
+                    <button class="m-btn m-drop" id="bm-drop">HARD DROP</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="./game.js"></script>
 </body>
 </html>
