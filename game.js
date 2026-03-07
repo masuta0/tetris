@@ -416,6 +416,7 @@ class Tetris {
             const id = 'u_' + Math.random().toString(36).slice(2, 9) + Date.now();
             localStorage.setItem('tetrisUserId', id); return id;
         })();
+        this.rankingUserKey = this._buildRankingUserKey();
 
         this.mp        = new MultiplayerManager(this);
         this.mpActive  = false;
@@ -733,10 +734,14 @@ class Tetris {
         });
         try {
             const res  = await API.get('tetris_ranking', { sort: '-score', limit: 10 });
-            const data = (res.data || []).map(r => ({ playerName: r.playerName || 'Player', score: r.score || 0, userId: r.userId || '' }));
-            this._renderRanking(this._mergeRanking(data, this._localRanking()));
+            const data = (res.data || []).map(r => ({ playerName: r.playerName || 'Player', score: r.score || 0, userId: r.userId || r.rankingUserKey || '' }));
+            const merged = this._mergeRanking(data, this._localRanking());
+            this._renderRanking(merged);
+            this._syncPersonalBestFromRanking(merged);
         } catch (_) {
-            this._renderRanking(this._localRanking());
+             const local = this._localRanking();
+            this._renderRanking(local);
+            this._syncPersonalBestFromRanking(local);
         }
     }
 
@@ -744,20 +749,25 @@ class Tetris {
         this._saveLocal();
         if (this.score <= 0) return;
         try {
-            const res = await API.get('tetris_ranking', { search: this.userId, limit: 10 });
-            const ex  = (res.data || []).find(r => r.userId === this.userId);
-            if (ex) { if (ex.score < this.score) await API.patch('tetris_ranking', ex.id, { playerName: this.playerName, score: this.score }); }
-            else await API.post('tetris_ranking', { userId: this.userId, playerName: this.playerName, score: this.score });
+                     const key = this._buildRankingUserKey();
+            const res = await API.get('tetris_ranking', { search: key, limit: 30 });
+            const ex  = (res.data || []).find(r => (r.userId || r.rankingUserKey || '') === key);
+            if (ex) {
+                if (ex.score < this.score) await API.patch('tetris_ranking', ex.id, { playerName: this.playerName, score: this.score, userId: key });
+            } else {
+                await API.post('tetris_ranking', { userId: key, playerName: this.playerName, score: this.score });
+            }
             this.fetchRanking();
         } catch (_) {}
     }
 
     _saveLocal() {
         if (this.score <= 0) return;
+                const key = this._buildRankingUserKey();
         let list = this._localRanking();
-        const idx = list.findIndex(r => r.userId === this.userId);
-        if (idx >= 0) { if (list[idx].score < this.score) list[idx] = { playerName: this.playerName, score: this.score, userId: this.userId }; }
-        else list.push({ playerName: this.playerName, score: this.score, userId: this.userId });
+              const idx = list.findIndex(r => r.userId === key);
+        if (idx >= 0) { if (list[idx].score < this.score) list[idx] = { playerName: this.playerName, score: this.score, userId: key }; }
+        else list.push({ playerName: this.playerName, score: this.score, userId: key });
         localStorage.setItem('tetrisOfflineRanking', JSON.stringify(this._sortRank(list)));
     }
 
@@ -765,9 +775,29 @@ class Tetris {
         const list = JSON.parse(localStorage.getItem('tetrisOfflineRanking') || '[]')
             .map((e, i) => this._normEntry(e, `l${i}`)).filter(Boolean);
         const hs = Number(localStorage.getItem('tetrisHighScore') || '0');
-        if (hs > 0 && !list.some(r => r.userId === this.userId && r.score >= hs))
-            list.push({ playerName: this.playerName || 'Player', score: hs, userId: this.userId });
+        const key = this._buildRankingUserKey();
+        if (hs > 0 && !list.some(r => r.userId === key && r.score >= hs))
+            list.push({ playerName: this.playerName || 'Player', score: hs, userId: key });
         return this._sortRank(list);
+    }
+
+  _syncPersonalBestFromRanking(list = []) {
+        const key = this._buildRankingUserKey();
+        const mine = list.filter(r => r && r.userId === key);
+        if (!mine.length) return;
+        const best = Math.max(...mine.map(r => Number(r.score) || 0));
+        if (best > this.highScore) {
+            this.highScore = best;
+            localStorage.setItem('tetrisHighScore', this.highScore);
+            this._updateHomeStats();
+            this.updateDisplay();
+        }
+    }
+
+    _buildRankingUserKey() {
+        const name = String(this.playerName || '').trim().toLowerCase();
+        this.rankingUserKey = (name && name !== 'player') ? `name:${name}` : `uid:${this.userId}`;
+        return this.rankingUserKey;
     }
 
     _mergeRanking(a, b) {
@@ -882,6 +912,8 @@ class Tetris {
     _saveName() {
         this.playerName = document.getElementById('player-name-input').value.trim() || 'Player';
         localStorage.setItem('tetrisPlayerName', this.playerName);
+               this._buildRankingUserKey();
+        this.fetchRanking();
         const btn = document.getElementById('save-name-button');
         const orig = btn.textContent;
         btn.textContent = '✓ 保存完了'; btn.style.background = 'linear-gradient(45deg,#00ff88,#00cc6a)';
