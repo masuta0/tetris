@@ -94,6 +94,8 @@ class MultiplayerManager {
         this.opponentAlive = true;
         this.pendingGarbage = 0;
         this.lastOppAtk    = 0;
+        this.opponentName  = '対戦相手';
+        this.startAt       = 0;
 
         // 勝利管理
         this.myWins     = 0;
@@ -116,13 +118,15 @@ class MultiplayerManager {
                 p1Attack: 0, p2Attack: 0,
                 p1Alive: true, p2Alive: true,
                 p1Wins: 0, p2Wins: 0,
-                maxWins: this.maxWins,
+                maxWins: this.game.matchMaxWins,
                 roundNum: 1,
+                startAt: 0,
                 winner: ''
             });
             this.roomRecordId = room.id;
             this.roomCode = code;
             this.isHost = true;
+            this.maxWins = this.game.matchMaxWins;
             this._resetState();
             this._startPoll();
 
@@ -132,7 +136,9 @@ class MultiplayerManager {
                     <p class="room-code-display">${code}</p>
                     <p style="font-size:0.8rem;opacity:0.7">このコードを対戦相手に伝えてください</p>
                     <p style="font-size:0.8rem;color:#ffcc00;margin-top:8px">🔄 対戦相手を待っています...</p>
+                                        <p style="font-size:0.78rem;opacity:0.75">相手が入室したら「対戦を開始」を押してください</p>
                 </div>`;
+        　this.game.toggleHostStartButton(false);
         } catch (e) {
             document.getElementById('multiplayer-status').textContent = 'ルーム作成に失敗しました';
         }
@@ -146,26 +152,42 @@ class MultiplayerManager {
             if (!room) { alert('ルームが見つからないか、既に満員です'); return; }
 
             await API.patch('tetris_rooms', room.id, {
-                player2Id: this.playerId, player2Name: this.game.playerName, status: 'playing'
+                player2Id: this.playerId,
+                player2Name: this.game.playerName,
+                status: 'ready'
             });
             this.roomRecordId = room.id;
             this.roomCode = upper;
             this.isHost = false;
             this.maxWins = room.maxWins || 3;
+            this.game.setMatchMaxWins(this.maxWins, false);
             this._resetState();
+            this.startAt = 0;
+            this.opponentName = room.player1Name || '対戦相手';
             this._startPoll();
 
             document.getElementById('multiplayer-status').innerHTML =
-                `<p style="color:var(--green);">✅ ルームに参加しました！対戦開始を待っています...</p>`;
-            setTimeout(() => this.game.beginMultiplayer(), 1200);
+                `<p style="color:var(--green);">✅ ルームに参加しました！<br>対戦相手: <strong>${this.opponentName}</strong><br>主催者が開始するまで待機中です...</p>`;
+            this.game.toggleHostStartButton(false);
         } catch (e) {
             alert('ルームへの参加に失敗しました');
         }
     }
 
+    async startMatchByHost() {
+        if (!this.isHost || !this.roomRecordId) return;
+        const room = await API.getOne('tetris_rooms', this.roomRecordId).catch(() => null);
+        if (!room) return;
+        if (!room.player2Id) { this.game.showToast('まだ対戦相手が参加していません'); return; }
+        const startAt = Date.now() + 3000;
+        await API.patch('tetris_rooms', this.roomRecordId, { status: 'starting', startAt }).catch(() => {});
+        this.startAt = startAt;
+        this.game.toggleHostStartButton(false);
+    }
+
     _startPoll() {
         if (this.pollTimer) clearInterval(this.pollTimer);
-        this.pollTimer = setInterval(() => this._poll(), 400);
+         this.pollTimer = setInterval(() => this._poll(), 60);
     }
 
     stopPoll() {
@@ -182,6 +204,41 @@ class MultiplayerManager {
             this.myWins  = this.isHost ? (room.p1Wins || 0) : (room.p2Wins || 0);
             this.oppWins = this.isHost ? (room.p2Wins || 0) : (room.p1Wins || 0);
             this.maxWins = room.maxWins || 3;
+            this.game.setMatchMaxWins(this.maxWins, false);
+            this.opponentName = this.isHost ? (room.player2Name || '対戦相手') : (room.player1Name || '対戦相手');
+            this.startAt = room.startAt || 0;
+            this.game.updateOpponentName(this.opponentName);
+
+            const statusEl = document.getElementById('multiplayer-status');
+            if (!this.game.mpActive && statusEl) {
+                if (status === 'waiting') {
+                    statusEl.innerHTML = `<p style="color:#ffcc00;">🔄 対戦相手を待っています...</p>`;
+                } else if (status === 'ready') {
+                    statusEl.innerHTML = this.isHost
+                        ? `<p style="color:var(--green);">✅ 対戦相手: <strong>${this.opponentName}</strong><br>開始ボタンで試合を始めてください</p>`
+                        : `<p style="color:var(--cyan);">対戦相手: <strong>${this.opponentName}</strong><br>主催者が開始するまで待機中です...</p>`;
+                }
+            }
+            if (!this.game.mpActive) this.game.toggleHostStartButton(this.isHost && status === 'ready');
+
+            if (status === 'starting') {
+                this.game.toggleHostStartButton(false);
+                const remains = Math.max(0, Math.ceil((this.startAt - Date.now()) / 1000));
+                if (statusEl && !this.game.mpActive) {
+                    statusEl.innerHTML = `<p style="color:var(--cyan);">対戦相手: <strong>${this.opponentName}</strong><br>⏳ ${remains}秒後に開始</p>`;
+                }
+                if (Date.now() >= this.startAt) {
+                    if (this.isHost) {
+                        await API.patch('tetris_rooms', this.roomRecordId, { status: 'playing' }).catch(() => {});
+                    }
+                    if (!this.game.mpActive) {
+                        this.lastRoundSeen = room.roundNum || 1;
+                        this.roundNum = this.lastRoundSeen;
+                        this.game.beginMultiplayer();
+                    }
+                }
+                return;
+            }
 
             if (status === 'abandoned') {
                 this.game.showToast('⚠️ 相手が退出しました');
@@ -339,11 +396,14 @@ class MultiplayerManager {
         this.opponentBoard = []; this.opponentScore = 0; this.opponentAlive = true;
         this.pendingGarbage = 0; this.lastOppAtk = 0;
         this.myWins = 0; this.oppWins = 0; this.roundNum = 1; this.lastRoundSeen = 0;
+        this.opponentName = '対戦相手'; this.startAt = 0;
+        this.game.toggleHostStartButton(false);
     }
 
     _resetState() {
         this.myWins = 0; this.oppWins = 0; this.roundNum = 1; this.lastRoundSeen = 0;
         this.opponentAlive = true; this.pendingGarbage = 0; this.lastOppAtk = 0;
+                this.startAt = 0;
     }
 }
 
@@ -412,6 +472,7 @@ class Tetris {
         this.difficulty    = localStorage.getItem('tetrisDifficulty')             || 'normal';
         this.currentTheme  = localStorage.getItem('tetrisTheme')                  || 'dark';
         this.gameStartTime = 0;
+        this.matchMaxWins  = parseInt(localStorage.getItem('tetrisMatchMaxWins') || '3');
         this.userId = localStorage.getItem('tetrisUserId') || (() => {
             const id = 'u_' + Math.random().toString(36).slice(2, 9) + Date.now();
             localStorage.setItem('tetrisUserId', id); return id;
@@ -438,6 +499,8 @@ class Tetris {
         this.drawHold();
         this._updateHomeStats();
         this._refreshControlsUI();
+        this._normalizeMatchSettings();
+        this._updateMatchSettingsUI();
         this.fetchRanking(true);
         setInterval(() => {
             if (document.getElementById('home-screen').classList.contains('active')) this.fetchRanking(true);
@@ -469,6 +532,7 @@ class Tetris {
         if (id === 'online-screen') {
             const inp = document.getElementById('player-name-input');
             if (inp) inp.value = this.playerName;
+                this._updateMatchSettingsUI();
         }
         if (id === 'settings-screen') {
             this._updateDiffUI(); this._updateThemeUI(); this._setupKeyConfig();
@@ -481,6 +545,8 @@ class Tetris {
         const r = document.getElementById('resume-play-button');
         if (r) r.style.display = this.gameRunning ? 'flex' : 'none';
         this.fetchRanking(true);
+        this._normalizeMatchSettings();
+        this._updateMatchSettingsUI();
     }
 
     _on(id, fn) { const el = document.getElementById(id); if (el) el.addEventListener('click', fn.bind(this)); }
@@ -511,6 +577,11 @@ class Tetris {
         });
         this._on('save-name-button',           () => this._saveName());
         this._on('create-room-button',         () => this.mp.createRoom());
+        this._on('host-start-button',          () => this.mp.startMatchByHost());
+        const maxWinsSelect = document.getElementById('max-wins-select');
+        if (maxWinsSelect) {
+            maxWinsSelect.addEventListener('change', e => this.setMatchMaxWins(parseInt(e.target.value || '3')));
+        }
         this._on('join-room-button',           () => {
             const code = document.getElementById('room-code-input').value.trim();
             if (code) this.mp.joinRoom(code); else alert('ルームコードを入力してください');
@@ -635,6 +706,7 @@ class Tetris {
         this._bindMobile('bm-');
         this.resetGame();
         this.switchScreen('battle-screen');
+        this.toggleHostStartButton(false);
         this.mp.lastRoundSeen = this.mp.roundNum;
         this._battleInit();
         this.gameRunning = true; this.isPaused = false;
@@ -662,13 +734,18 @@ class Tetris {
     _battleInit() {
         const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
         set('battle-my-name',       this.playerName);
-        set('battle-opponent-name', '対戦相手');
+        set('battle-opponent-name', this.mp.opponentName || '対戦相手');
         set('battle-my-score',  '0');
         set('battle-opp-score', '0');
         set('garbage-count',    '0');
         set('attack-count',     '0');
         set('battle-round-badge', `Round ${this.mp.roundNum}`);
         this._renderStars();
+    }
+
+    updateOpponentName(name) {
+        const el = document.getElementById('battle-opponent-name');
+        if (el) el.textContent = name || '対戦相手';
     }
 
     _renderStars() {
@@ -689,7 +766,7 @@ class Tetris {
         this._renderStars();
         this._showResult(true, false,
             `🏆 Round ${this.mp.roundNum} 勝利！`,
-            `${this.mp.myWins} / ${this.mp.maxWins} 勝  —  次のラウンドへ...`,
+            `${this.mp.myWins} / ${this.mp.maxWins} 勝  —  ${this.mp.opponentName || '対戦相手'}を撃破！次のラウンドへ...`,
             false
         );
         if (this.mp.isHost) setTimeout(() => this.mp.hostStartNextRound(), 3000);
@@ -717,7 +794,12 @@ class Tetris {
         if (titleEl) { titleEl.textContent = title; titleEl.style.color = isWin ? '#00ff88' : '#ff4444'; }
         if (msgEl)   msgEl.textContent = msg;
         if (homeBtn) homeBtn.style.display = showBtn ? 'inline-flex' : 'none';
-        if (ov) { ov.classList.remove('hidden'); if (!isEnd) setTimeout(() => ov.classList.add('hidden'), 2800); }
+        if (ov) {
+            ov.classList.remove('result-win', 'result-lose');
+            ov.classList.add(isWin ? 'result-win' : 'result-lose');
+            ov.classList.remove('hidden');
+            if (!isEnd) setTimeout(() => ov.classList.add('hidden'), 2800);
+        }
     }
 
     forceEndMultiplayer() {
@@ -784,7 +866,9 @@ class Tetris {
                     score: this.score
                 });
             }
-            this.fetchRanking(true);
+            this._normalizeMatchSettings();
+        this._updateMatchSettingsUI();
+        this.fetchRanking(true);
         } catch (_) {}
     }
 
@@ -927,6 +1011,30 @@ class Tetris {
         s('key-disp-pause',       g('pause'));
     }
 
+    _normalizeMatchSettings() {
+        if (![1,2,3,5].includes(this.matchMaxWins)) this.matchMaxWins = 3;
+    }
+
+    setMatchMaxWins(wins, persist = true) {
+        const n = [1,2,3,5].includes(wins) ? wins : 3;
+        this.matchMaxWins = n;
+        if (persist) localStorage.setItem('tetrisMatchMaxWins', String(n));
+        this._updateMatchSettingsUI();
+    }
+
+    _updateMatchSettingsUI() {
+        const select = document.getElementById('max-wins-select');
+        if (select) select.value = String(this.matchMaxWins);
+        const label = document.getElementById('max-wins-label');
+        if (label) label.textContent = `先${this.matchMaxWins}勝制`;
+    }
+
+    toggleHostStartButton(show) {
+        const btn = document.getElementById('host-start-button');
+        if (!btn) return;
+        btn.classList.toggle('hidden', !show);
+    }
+
     // =====================================================
     // 難易度 / テーマ / 名前
     // =====================================================
@@ -959,6 +1067,8 @@ class Tetris {
         this.playerName = document.getElementById('player-name-input').value.trim() || 'Player';
         localStorage.setItem('tetrisPlayerName', this.playerName);
         this._buildRankingUserKey();
+        this._normalizeMatchSettings();
+        this._updateMatchSettingsUI();
         this.fetchRanking(true);
         const btn = document.getElementById('save-name-button');
         const orig = btn.textContent;
@@ -1275,6 +1385,10 @@ class Tetris {
             s('garbage-count',    this.mp.pendingGarbage);
             s('battle-my-score',  this.score.toLocaleString());
             s('battle-opp-score', this.mp.opponentScore.toLocaleString());
+            if (now - this.lastBoardSend > 80) {
+                this.lastBoardSend = now;
+                this.mp.sendBoard(this.board, this.score);
+            }
         }
 
         this.draw();
