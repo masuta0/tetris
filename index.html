@@ -125,7 +125,16 @@
                     <button id="save-name-button" class="save-button">保存</button>
                 </div>
 
-                <h3>対戦オプション <span style="font-size:0.8rem;color:rgba(255,255,255,0.4);font-weight:400;">先3勝制</span></h3>
+                <h3>対戦オプション <span id="max-wins-label" style="font-size:0.8rem;color:rgba(255,255,255,0.4);font-weight:400;">先3勝制</span></h3>
+                <div class="online-option-row">
+                    <label for="max-wins-select">勝利条件</label>
+                    <select id="max-wins-select" class="online-select">
+                        <option value="1">先1勝</option>
+                        <option value="2">先2勝</option>
+                        <option value="3" selected>先3勝</option>
+                        <option value="5">先5勝</option>
+                    </select>
+                </div>
                 <div class="action-buttons">
                     <button id="create-room-button" class="action-button primary">
                         <i class="fas fa-plus-circle"></i> ルームを作成
@@ -138,6 +147,9 @@
                     </div>
                 </div>
                 <div id="multiplayer-status" style="margin-top: 1rem; color: var(--cyan); font-size: 0.9rem;"></div>
+                <button id="host-start-button" class="action-button primary host-start-button hidden">
+                    <i class="fas fa-play"></i> 対戦を開始
+                </button>
             </div>
         </div>
     </div>
