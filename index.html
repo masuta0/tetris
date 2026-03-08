@@ -11,421 +11,564 @@
 </head>
 <body class="theme-dark">
 
-    <div class="bg-grid"></div>
+<div class="bg-grid"></div>
 
-    <!-- ホーム画面 -->
-    <div id="home-screen" class="screen active">
-        <div class="home-container">
-            <header class="home-header">
-                <h1 class="game-title">テトリス</h1>
-                <p class="game-subtitle">TETRIS GAME</p>
-            </header>
-
-            <div class="home-content-split">
-                <div class="home-left-panel">
-                    <div class="home-stats">
-                        <div class="stat-item">
-                            <span class="stat-label">ハイスコア</span>
-                            <span class="stat-value" id="high-score">0</span>
-                        </div>
-                        <div class="stat-item">
-                            <span class="stat-label">プレイ時間</span>
-                            <span class="stat-value" id="total-play-time">0分</span>
-                        </div>
-                        <div class="stat-item">
-                            <span class="stat-label">総ライン</span>
-                            <span class="stat-value" id="total-lines">0</span>
-                        </div>
+<!-- ═══════════════════════════════════════════════
+     ホーム画面
+════════════════════════════════════════════════ -->
+<div id="home-screen" class="screen active">
+    <div class="home-container">
+        <header class="home-header">
+            <h1 class="game-title">テトリス</h1>
+            <p class="game-subtitle">TETRIS GAME</p>
+        </header>
+        <div class="home-content-split">
+            <div class="home-left-panel">
+                <div class="home-stats">
+                    <div class="stat-item">
+                        <span class="stat-label">ハイスコア</span>
+                        <span class="stat-value" id="high-score">0</span>
                     </div>
-
-                    <div class="home-buttons">
-                        <button id="resume-play-button" class="home-button secondary" style="display:none;">
-                            <i class="fas fa-play"></i> プレイに戻る
-                        </button>
-                        <button id="solo-play-button" class="home-button primary">
-                            <i class="fas fa-gamepad"></i> ソロプレイ
-                        </button>
-                        <button id="online-play-button" class="home-button secondary">
-                            <i class="fas fa-wifi"></i> オンライン対戦
-                        </button>
-                        <button id="ranking-button" class="home-button tertiary">
-                            <i class="fas fa-trophy"></i> ランキング
-                        </button>
-                        <button id="settings-button" class="home-button tertiary">
-                            <i class="fas fa-cog"></i> 設定
-                        </button>
+                    <div class="stat-item">
+                        <span class="stat-label">プレイ時間</span>
+                        <span class="stat-value" id="total-play-time">0分</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">総ライン</span>
+                        <span class="stat-value" id="total-lines">0</span>
                     </div>
                 </div>
-
-                <div class="home-right-panel">
-                    <div class="home-ranking-container">
-                        <div class="ranking-header-inner">
-                            <h3>🏆 TOP 10 ランキング</h3>
-                            <div class="ranking-refresh-dot" title="10秒ごとに自動更新"></div>
-                        </div>
-                        <div id="home-ranking-list"></div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- 難易度選択画面 -->
-    <div id="opening-screen" class="screen">
-        <div class="opening-container">
-            <header class="opening-header">
-                <h2 class="opening-title">ゲーム開始</h2>
-                <button id="back-to-home-from-opening" class="back-button">
-                    <i class="fas fa-arrow-left"></i> ホームに戻る
-                </button>
-            </header>
-            <p class="opening-subtitle">難易度を選択してください</p>
-
-            <div class="difficulty-buttons">
-                <button id="easy-mode" class="difficulty-button">
-                    <div class="difficulty-icon">🌱</div>
-                    <div class="difficulty-name">イージー</div>
-                    <div class="difficulty-desc">ゆっくりとした速度で、初心者でも遊びやすくなっています。</div>
-                </button>
-                <button id="normal-mode" class="difficulty-button active">
-                    <div class="difficulty-icon">⭐</div>
-                    <div class="difficulty-name">ノーマル</div>
-                    <div class="difficulty-desc">標準的な速度でプレイできます。</div>
-                </button>
-                <button id="hard-mode" class="difficulty-button">
-                    <div class="difficulty-icon">🔥</div>
-                    <div class="difficulty-name">ハード</div>
-                    <div class="difficulty-desc">高速で落下し、上級者向けの難易度です。</div>
-                </button>
-            </div>
-
-            <div class="opening-footer">
-                <div></div>
-                <button id="start-button" class="start-button">
-                    ゲーム開始 <i class="fas fa-play"></i>
-                </button>
-            </div>
-        </div>
-    </div>
-
-    <!-- オンライン画面 -->
-    <div id="online-screen" class="screen">
-        <div class="online-container">
-            <header class="online-header">
-                <h2 class="online-title">オンライン対戦</h2>
-                <button id="back-to-home-from-online" class="back-button">
-                    <i class="fas fa-arrow-left"></i> ホームに戻る
-                </button>
-            </header>
-
-            <div class="online-content">
-                <h3>プレイヤー情報</h3>
-                <div class="player-name-input">
-                    <input type="text" id="player-name-input" placeholder="プレイヤー名を入力" maxlength="10">
-                    <button id="save-name-button" class="save-button">保存</button>
-                </div>
-
-                <h3>対戦オプション <span id="max-wins-label" style="font-size:0.8rem;color:rgba(255,255,255,0.4);font-weight:400;">先3勝制</span></h3>
-                <div class="online-option-row">
-                    <label for="max-wins-select">勝利条件</label>
-                    <select id="max-wins-select" class="online-select">
-                        <option value="1">先1勝</option>
-                        <option value="2">先2勝</option>
-                        <option value="3" selected>先3勝</option>
-                        <option value="5">先5勝</option>
-                    </select>
-                </div>
-                <div class="action-buttons">
-                    <button id="create-room-button" class="action-button primary">
-                        <i class="fas fa-plus-circle"></i> ルームを作成
+                <div class="home-buttons">
+                    <button id="resume-play-button" class="home-button secondary" style="display:none;">
+                        <i class="fas fa-play"></i> プレイに戻る
                     </button>
+                    <button id="solo-play-button" class="home-button primary">
+                        <i class="fas fa-gamepad"></i> ソロプレイ
+                    </button>
+                    <button id="online-play-button" class="home-button secondary">
+                        <i class="fas fa-wifi"></i> オンライン対戦
+                    </button>
+                    <button id="ranking-button" class="home-button tertiary">
+                        <i class="fas fa-trophy"></i> ランキング
+                    </button>
+                    <button id="settings-button" class="home-button tertiary">
+                        <i class="fas fa-cog"></i> 設定
+                    </button>
+                </div>
+            </div>
+            <div class="home-right-panel">
+                <div class="home-ranking-container">
+                    <div class="ranking-header-inner">
+                        <h3>🏆 TOP 10 ランキング</h3>
+                        <div class="ranking-refresh-dot" title="10秒ごとに自動更新"></div>
+                    </div>
+                    <div id="home-ranking-list"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     難易度選択画面
+════════════════════════════════════════════════ -->
+<div id="opening-screen" class="screen">
+    <div class="opening-container">
+        <header class="opening-header">
+            <h2 class="opening-title">ゲーム開始</h2>
+            <button id="back-to-home-from-opening" class="back-button">
+                <i class="fas fa-arrow-left"></i> ホームに戻る
+            </button>
+        </header>
+        <p class="opening-subtitle">難易度を選択してください</p>
+        <div class="difficulty-buttons">
+            <button id="easy-mode" class="difficulty-button">
+                <div class="difficulty-icon">🌱</div>
+                <div class="difficulty-name">イージー</div>
+                <div class="difficulty-desc">ゆっくりとした速度で、初心者でも遊びやすくなっています。</div>
+            </button>
+            <button id="normal-mode" class="difficulty-button active">
+                <div class="difficulty-icon">⭐</div>
+                <div class="difficulty-name">ノーマル</div>
+                <div class="difficulty-desc">標準的な速度でプレイできます。</div>
+            </button>
+            <button id="hard-mode" class="difficulty-button">
+                <div class="difficulty-icon">🔥</div>
+                <div class="difficulty-name">ハード</div>
+                <div class="difficulty-desc">高速で落下し、上級者向けの難易度です。</div>
+            </button>
+        </div>
+        <div class="opening-footer">
+            <div></div>
+            <button id="start-button" class="start-button">
+                ゲーム開始 <i class="fas fa-play"></i>
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     オンライン入口画面
+════════════════════════════════════════════════ -->
+<div id="online-screen" class="screen">
+    <div class="online-container">
+        <header class="online-header">
+            <h2 class="online-title">オンライン対戦</h2>
+            <button id="back-to-home-from-online" class="back-button">
+                <i class="fas fa-arrow-left"></i> ホームに戻る
+            </button>
+        </header>
+        <div class="online-content">
+            <h3>プレイヤー情報</h3>
+            <div class="player-name-input">
+                <input type="text" id="player-name-input" placeholder="プレイヤー名を入力" maxlength="10">
+                <button id="save-name-button" class="save-button">保存</button>
+            </div>
+
+            <div class="online-actions-grid">
+                <!-- 作成カード -->
+                <div class="online-action-card">
+                    <div class="online-action-icon">➕</div>
+                    <div class="online-action-title">ルームを作成</div>
+                    <div class="online-action-desc">最大4人のロビーを作成します<br>ルールをカスタマイズ可能</div>
+                    <button id="create-room-button" class="action-button primary">
+                        <i class="fas fa-plus-circle"></i> 作成する
+                    </button>
+                </div>
+                <!-- 参加カード -->
+                <div class="online-action-card">
+                    <div class="online-action-icon">🔗</div>
+                    <div class="online-action-title">ルームに参加</div>
+                    <div class="online-action-desc">コードを入力して参加します<br>観戦モードも選択可能</div>
                     <div class="join-room-section">
-                        <input type="text" id="room-code-input" placeholder="ルームIDを入力" maxlength="20">
+                        <input type="text" id="room-code-input" placeholder="ルームコード" maxlength="8"
+                               style="text-transform:uppercase; letter-spacing:0.2em; font-family:'Orbitron',monospace;">
                         <button id="join-room-button" class="action-button secondary">
                             <i class="fas fa-sign-in-alt"></i> 参加
                         </button>
                     </div>
                 </div>
-                <div id="multiplayer-status" style="margin-top: 1rem; color: var(--cyan); font-size: 0.9rem;"></div>
-                <button id="host-start-button" class="action-button primary host-start-button hidden">
-                    <i class="fas fa-play"></i> 対戦を開始
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     ★ ロビー画面（スマブラ風）
+════════════════════════════════════════════════ -->
+<div id="lobby-screen" class="screen">
+    <div class="lobby-wrap">
+        <div class="lobby-card">
+
+            <!-- ロビーヘッダー -->
+            <div class="lobby-head">
+                <button id="lobby-leave-btn" class="back-button">
+                    <i class="fas fa-arrow-left"></i> 退出
                 </button>
-            </div>
-        </div>
-    </div>
-
-    <!-- ランキング画面 -->
-    <div id="ranking-screen" class="screen">
-        <div class="ranking-container">
-            <header class="ranking-header">
-                <h2 class="ranking-title">ランキング</h2>
-                <button id="back-to-home-from-ranking" class="back-button">
-                    <i class="fas fa-arrow-left"></i> ホームに戻る
-                </button>
-            </header>
-            <div id="ranking-list"></div>
-        </div>
-    </div>
-
-    <!-- 設定画面 -->
-    <div id="settings-screen" class="screen">
-        <div class="settings-container">
-            <header class="settings-header">
-                <h2 class="settings-title">設定</h2>
-                <button id="back-to-home-from-settings" class="back-button">
-                    <i class="fas fa-arrow-left"></i> ホームに戻る
-                </button>
-            </header>
-
-            <div class="settings-content">
-                <section class="settings-section">
-                    <h3>難易度</h3>
-                    <div class="difficulty-selector">
-                        <button id="easy-mode-settings"   class="difficulty-button-settings" data-difficulty="easy">イージー</button>
-                        <button id="normal-mode-settings" class="difficulty-button-settings active" data-difficulty="normal">ノーマル</button>
-                        <button id="hard-mode-settings"   class="difficulty-button-settings" data-difficulty="hard">ハード</button>
-                    </div>
-                    <p id="difficulty-description" class="setting-description">標準的な速度でプレイできます。</p>
-                </section>
-
-                <section class="settings-section">
-                    <h3>キー設定</h3>
-                    <div class="key-config">
-                        <div class="key-row"><span>左移動</span>    <button class="key-btn" data-key="left">←</button></div>
-                        <div class="key-row"><span>右移動</span>    <button class="key-btn" data-key="right">→</button></div>
-                        <div class="key-row"><span>ソフトドロップ</span><button class="key-btn" data-key="down">↓</button></div>
-                        <div class="key-row"><span>ハードドロップ</span><button class="key-btn" data-key="hardDrop">Space</button></div>
-                        <div class="key-row"><span>右回転</span>    <button class="key-btn" data-key="rotateRight">↑</button></div>
-                        <div class="key-row"><span>左回転</span>    <button class="key-btn" data-key="rotateLeft">Alt</button></div>
-                        <div class="key-row"><span>ホールド</span>  <button class="key-btn" data-key="hold">Ctrl</button></div>
-                        <div class="key-row"><span>ポーズ</span>    <button class="key-btn" data-key="pause">P</button></div>
-                    </div>
-                </section>
-
-                <section class="settings-section">
-                    <h3>テーマ</h3>
-                    <div class="theme-selector">
-                        <button id="theme-dark"   class="theme-button active" data-theme="dark">  <div class="theme-preview theme-dark-preview"></div>  <span>ダーク</span></button>
-                        <button id="theme-light"  class="theme-button" data-theme="light"> <div class="theme-preview theme-light-preview"></div>  <span>ライト</span></button>
-                        <button id="theme-neon"   class="theme-button" data-theme="neon">  <div class="theme-preview theme-neon-preview"></div>   <span>ネオン</span></button>
-                        <button id="theme-retro"  class="theme-button" data-theme="retro"> <div class="theme-preview theme-retro-preview"></div>  <span>レトロ</span></button>
-                        <button id="theme-nature" class="theme-button" data-theme="nature"><div class="theme-preview theme-nature-preview"></div> <span>ナチュラル</span></button>
-                        <button id="theme-ocean"  class="theme-button" data-theme="ocean"> <div class="theme-preview theme-ocean-preview"></div>  <span>オーシャン</span></button>
-                    </div>
-                    <p id="theme-description" class="setting-description">ダークモード：目に優しい暗いテーマ</p>
-                </section>
-            </div>
-        </div>
-    </div>
-
-    <!-- ソロゲーム画面 -->
-    <div id="game-screen" class="screen">
-        <div class="game-container">
-            <div class="game-header">
-                <button id="menu-button" class="menu-button"><i class="fas fa-bars"></i> メニュー</button>
-                <div class="game-title-small">TETRIS</div>
-                <div style="width:80px"></div>
-            </div>
-
-            <div class="game-content">
-                <div class="game-left-panel">
-                    <div class="hold-section">
-                        <div class="panel-title">HOLD</div>
-                        <canvas id="hold-canvas" width="84" height="84"></canvas>
-                    </div>
-                    <div class="stats-section">
-                        <div class="stat-item"><span class="stat-label">SCORE</span><span class="stat-value" id="score">0</span></div>
-                        <div class="stat-item"><span class="stat-label">LEVEL</span><span class="stat-value" id="level">1</span></div>
-                        <div class="stat-item"><span class="stat-label">LINES</span><span class="stat-value" id="lines">0</span></div>
-                        <div class="stat-item"><span class="stat-label">BEST</span><span class="stat-value" id="high-score-display">0</span></div>
-                    </div>
-                </div>
-
-                <div class="game-center-panel">
-                    <canvas id="game-canvas" width="300" height="600"></canvas>
-
-                    <div id="pause-overlay" class="pause-overlay hidden">
-                        <div class="pause-content">
-                            <h3>— PAUSE —</h3>
-                            <p>ゲームが一時停止されています</p>
-                            <div class="pause-buttons">
-                                <button id="resume-button" class="resume-button">再開</button>
-                                <button id="home-from-pause-button" class="home-button">ホームへ</button>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div id="game-over" class="game-over hidden">
-                        <div class="game-over-content">
-                            <h2>GAME OVER</h2>
-                            <div class="final-scores">
-                                <div class="score-item">
-                                    <span class="score-label">最終スコア</span>
-                                    <span class="score-value" id="final-score">0</span>
-                                </div>
-                                <div class="score-item">
-                                    <span class="score-label">ハイスコア</span>
-                                    <span class="score-value" id="final-high-score">0</span>
-                                </div>
-                            </div>
-
-                            <div class="game-over-ranking-container">
-                                <h3>🏆 TOP RANKERS</h3>
-                                <div id="game-over-ranking-list"></div>
-                            </div>
-
-                            <div class="game-over-buttons">
-                                <button id="restart-button" class="restart-button">もう一度</button>
-                                <button id="back-to-home-button" class="home-button">ホームへ</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="game-right-panel">
-                    <div class="next-section">
-                        <div class="panel-title">NEXT</div>
-                        <canvas id="next-canvas" width="84" height="84"></canvas>
-                    </div>
-                    <div class="controls-section">
-                        <div class="panel-title">CONTROLS</div>
-                        <div class="controls-list">
-                            <div class="control-item"><span class="control-key" id="key-disp-move">←/→</span><span class="control-desc">移動</span></div>
-                            <div class="control-item"><span class="control-key" id="key-disp-rotateRight">↑</span><span class="control-desc">右回転</span></div>
-                            <div class="control-item"><span class="control-key" id="key-disp-rotateLeft">Alt</span><span class="control-desc">左回転</span></div>
-                            <div class="control-item"><span class="control-key" id="key-disp-down">↓</span><span class="control-desc">ソフト</span></div>
-                            <div class="control-item"><span class="control-key" id="key-disp-hardDrop">SPC</span><span class="control-desc">ハード</span></div>
-                            <div class="control-item"><span class="control-key" id="key-disp-hold">Ctrl</span><span class="control-desc">ホールド</span></div>
-                            <div class="control-item"><span class="control-key" id="key-disp-pause">P</span><span class="control-desc">ポーズ</span></div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="mobile-controls" id="mobile-controls">
-                <div class="m-row">
-                    <button class="m-btn m-btn-small" id="m-hold">HOLD</button>
-                    <button class="m-btn m-btn-small" id="m-up">↻</button>
-                </div>
-                <div class="m-row">
-                    <button class="m-btn" id="m-left">←</button>
-                    <button class="m-btn" id="m-down">↓</button>
-                    <button class="m-btn" id="m-right">→</button>
-                </div>
-                <div class="m-row">
-                    <button class="m-btn m-drop" id="m-drop">HARD DROP</button>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- 対戦画面 -->
-    <div id="battle-screen" class="screen">
-        <div class="battle-container">
-            <!-- ★ ヘッダー：勝利スター付き -->
-            <div class="battle-header">
-                <button id="battle-menu-button" class="menu-button"><i class="fas fa-bars"></i> 退出</button>
-
-                <div class="battle-title-bar">
-                    <div class="battle-player-block">
-                        <span class="battle-player-name" id="battle-my-name">あなた</span>
-                        <div class="win-stars-row" id="my-win-stars"></div>
-                    </div>
-                    <span class="battle-vs">VS</span>
-                    <div class="battle-player-block battle-player-block-right">
-                        <span class="battle-player-name" id="battle-opponent-name">対戦相手</span>
-                        <div class="win-stars-row" id="opp-win-stars"></div>
-                    </div>
-                </div>
-
-                <div class="battle-round-badge" id="battle-round-badge">Round 1</div>
-            </div>
-
-            <div class="battle-content">
-                <!-- 左: 自分の情報 -->
-                <div class="battle-side-panel battle-my-panel">
-                    <div class="hold-section">
-                        <div class="panel-title">HOLD</div>
-                        <canvas id="b-hold-canvas" width="84" height="84"></canvas>
-                    </div>
-                    <div class="battle-stats">
-                        <div class="battle-stat">
-                            <span class="stat-label">SCORE</span>
-                            <span class="stat-value" id="battle-my-score">0</span>
-                        </div>
-                        <div class="battle-stat">
-                            <span class="stat-label">LEVEL</span>
-                            <span class="stat-value" id="b-level">1</span>
-                        </div>
-                        <div class="battle-stat">
-                            <span class="stat-label">LINES</span>
-                            <span class="stat-value" id="b-lines">0</span>
-                        </div>
-                    </div>
-                    <div class="battle-gauge-section">
-                        <div class="gauge-item danger">
-                            <i class="fas fa-skull-crossbones"></i>
-                            <span>受信</span>
-                            <span class="gauge-value" id="garbage-count">0</span>
-                        </div>
-                        <div class="gauge-item attack">
-                            <i class="fas fa-bolt"></i>
-                            <span>攻撃</span>
-                            <span class="gauge-value" id="attack-count">0</span>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- 中央: 自分のゲームボード -->
-                <div class="battle-center">
-                    <canvas id="b-game-canvas" width="300" height="600"></canvas>
-                </div>
-
-                <!-- 右: 相手のボード -->
-                <div class="battle-opponent-side">
-                    <div class="next-section">
-                        <div class="panel-title">NEXT</div>
-                        <canvas id="b-next-canvas" width="84" height="84"></canvas>
-                    </div>
-                    <div class="opponent-board-section">
-                        <div class="panel-title">OPPONENT</div>
-                        <canvas id="opponent-canvas" width="120" height="240"></canvas>
-                        <div class="opp-score-display">
-                            <span>SCORE: </span><span id="battle-opp-score">0</span>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- 対戦結果オーバーレイ -->
-            <div id="battle-result-overlay" class="battle-result-overlay hidden">
-                <div class="battle-result-content">
-                    <h2 id="battle-result-title">🎉 WIN!</h2>
-                    <p id="battle-result-message">あなたの勝利です！</p>
-                    <button id="battle-result-home" class="btn-primary-action" style="display:none;">
-                        <i class="fas fa-home"></i> ホームへ
+                <h2 class="lobby-title">
+                    <i class="fas fa-users"></i> ロビー
+                </h2>
+                <div class="lobby-code-wrap">
+                    <span class="lobby-code-label">ROOM</span>
+                    <span id="lobby-room-code-display" class="lobby-code-value">------</span>
+                    <button id="lobby-copy-code-btn" class="lobby-icon-btn" title="コピー">
+                        <i class="fas fa-copy"></i>
                     </button>
                 </div>
             </div>
 
-            <!-- モバイルコントロール(対戦用) -->
-            <div class="mobile-controls" id="battle-mobile-controls">
-                <div class="m-row">
-                    <button class="m-btn m-btn-small" id="bm-hold">HOLD</button>
-                    <button class="m-btn m-btn-small" id="bm-up">↻</button>
+            <!-- ロビー本体 -->
+            <div class="lobby-body">
+
+                <!-- 左列：プレイヤー枠 -->
+                <div class="lobby-players-col">
+                    <div class="lobby-section-label">
+                        <i class="fas fa-users"></i> PLAYERS
+                    </div>
+                    <!-- 4スロット（JSで動的更新） -->
+                    <div class="lobby-slots" id="lobby-slots">
+                        <!-- slot cards injected by JS -->
+                    </div>
+
+                    <!-- 自分のアクションボタン -->
+                    <div class="lobby-my-actions">
+                        <button id="lobby-ready-btn" class="lobby-act-btn lobby-ready-btn-el">
+                            <i class="fas fa-check"></i> 準備する
+                        </button>
+                        <button id="lobby-spectate-btn" class="lobby-act-btn lobby-spectate-btn-el">
+                            <i class="fas fa-eye"></i> 観戦する
+                        </button>
+                    </div>
                 </div>
-                <div class="m-row">
-                    <button class="m-btn" id="bm-left">←</button>
-                    <button class="m-btn" id="bm-down">↓</button>
-                    <button class="m-btn" id="bm-right">→</button>
+
+                <!-- 右列：設定 + チャット -->
+                <div class="lobby-right-col">
+
+                    <!-- ルール設定パネル -->
+                    <div class="lobby-settings-panel">
+                        <div class="lobby-section-label">
+                            <i class="fas fa-sliders-h"></i> ルール設定
+                            <span class="lobby-host-only-hint" id="lobby-host-hint">(ホストのみ変更可)</span>
+                        </div>
+                        <div class="lobby-setting-row">
+                            <label class="lobby-setting-label">勝利条件</label>
+                            <select id="lobby-max-wins-sel" class="lobby-select">
+                                <option value="1">先1勝</option>
+                                <option value="2">先2勝</option>
+                                <option value="3" selected>先3勝</option>
+                                <option value="5">先5勝</option>
+                            </select>
+                        </div>
+                        <div class="lobby-setting-row">
+                            <label class="lobby-setting-label">ホールド</label>
+                            <select id="lobby-hold-sel" class="lobby-select">
+                                <option value="1" selected>あり</option>
+                                <option value="0">なし</option>
+                            </select>
+                        </div>
+                        <div class="lobby-setting-row">
+                            <label class="lobby-setting-label">攻撃対象</label>
+                            <select id="lobby-target-sel" class="lobby-select">
+                                <option value="random" selected>ランダム</option>
+                                <option value="top">1位狙い</option>
+                                <option value="bottom">最下位狙い</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- チャット -->
+                    <div class="lobby-chat-panel">
+                        <div class="lobby-section-label">
+                            <i class="fas fa-comment"></i> チャット
+                        </div>
+                        <div class="lobby-chat-messages" id="lobby-chat-messages">
+                            <!-- messages injected by JS -->
+                        </div>
+                        <div class="lobby-chat-row">
+                            <input type="text" id="lobby-chat-input" class="lobby-chat-input"
+                                   placeholder="メッセージを入力... (Enter送信)" maxlength="60">
+                            <button id="lobby-chat-send-btn" class="lobby-send-btn">
+                                <i class="fas fa-paper-plane"></i>
+                            </button>
+                        </div>
+                    </div>
                 </div>
-                <div class="m-row">
-                    <button class="m-btn m-drop" id="bm-drop">HARD DROP</button>
+            </div>
+
+            <!-- ロビーフッター：ステータス + スタートボタン -->
+            <div class="lobby-footer">
+                <div id="lobby-status-msg" class="lobby-status-msg">
+                    ロビーに参加しました
+                </div>
+                <button id="lobby-start-btn" class="lobby-start-btn hidden">
+                    <i class="fas fa-play"></i> ゲームスタート
+                </button>
+            </div>
+
+        </div><!-- /.lobby-card -->
+    </div><!-- /.lobby-wrap -->
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     ランキング画面
+════════════════════════════════════════════════ -->
+<div id="ranking-screen" class="screen">
+    <div class="ranking-container">
+        <header class="ranking-header">
+            <h2 class="ranking-title">ランキング</h2>
+            <button id="back-to-home-from-ranking" class="back-button">
+                <i class="fas fa-arrow-left"></i> ホームに戻る
+            </button>
+        </header>
+        <div id="ranking-list"></div>
+    </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     設定画面
+════════════════════════════════════════════════ -->
+<div id="settings-screen" class="screen">
+    <div class="settings-container">
+        <header class="settings-header">
+            <h2 class="settings-title">設定</h2>
+            <button id="back-to-home-from-settings" class="back-button">
+                <i class="fas fa-arrow-left"></i> ホームに戻る
+            </button>
+        </header>
+        <div class="settings-content">
+            <section class="settings-section">
+                <h3>難易度</h3>
+                <div class="difficulty-selector">
+                    <button id="easy-mode-settings"   class="difficulty-button-settings">イージー</button>
+                    <button id="normal-mode-settings" class="difficulty-button-settings active">ノーマル</button>
+                    <button id="hard-mode-settings"   class="difficulty-button-settings">ハード</button>
+                </div>
+                <p id="difficulty-description" class="setting-description">標準的な速度でプレイできます。</p>
+            </section>
+
+            <section class="settings-section">
+                <h3>キー設定</h3>
+                <div class="key-config">
+                    <div class="key-row"><span>左移動</span>      <button class="key-btn" data-key="left">←</button></div>
+                    <div class="key-row"><span>右移動</span>      <button class="key-btn" data-key="right">→</button></div>
+                    <div class="key-row"><span>ソフトドロップ</span><button class="key-btn" data-key="down">↓</button></div>
+                    <div class="key-row"><span>ハードドロップ</span><button class="key-btn" data-key="hardDrop">Space</button></div>
+                    <div class="key-row"><span>右回転</span>      <button class="key-btn" data-key="rotateRight">↑</button></div>
+                    <div class="key-row"><span>左回転</span>      <button class="key-btn" data-key="rotateLeft">Alt</button></div>
+                    <div class="key-row"><span>ホールド</span>    <button class="key-btn" data-key="hold">Ctrl</button></div>
+                    <div class="key-row"><span>ポーズ</span>      <button class="key-btn" data-key="pause">P</button></div>
+                </div>
+            </section>
+
+            <section class="settings-section">
+                <h3>テーマ</h3>
+                <div class="theme-selector">
+                    <button id="theme-dark"   class="theme-button active"><div class="theme-preview theme-dark-preview"></div><span>ダーク</span></button>
+                    <button id="theme-light"  class="theme-button"><div class="theme-preview theme-light-preview"></div><span>ライト</span></button>
+                    <button id="theme-neon"   class="theme-button"><div class="theme-preview theme-neon-preview"></div><span>ネオン</span></button>
+                    <button id="theme-retro"  class="theme-button"><div class="theme-preview theme-retro-preview"></div><span>レトロ</span></button>
+                    <button id="theme-nature" class="theme-button"><div class="theme-preview theme-nature-preview"></div><span>ナチュラル</span></button>
+                    <button id="theme-ocean"  class="theme-button"><div class="theme-preview theme-ocean-preview"></div><span>オーシャン</span></button>
+                </div>
+                <p id="theme-description" class="setting-description">ダークモード：目に優しい暗いテーマ</p>
+            </section>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     ソロゲーム画面
+════════════════════════════════════════════════ -->
+<div id="game-screen" class="screen">
+    <div class="game-container">
+        <div class="game-header">
+            <button id="menu-button" class="menu-button">
+                <i class="fas fa-bars"></i> メニュー
+            </button>
+            <div class="game-title-small">TETRIS</div>
+            <div style="width:80px"></div>
+        </div>
+
+        <div class="game-content">
+            <div class="game-left-panel">
+                <div class="hold-section">
+                    <div class="panel-title">HOLD</div>
+                    <canvas id="hold-canvas" width="84" height="84"></canvas>
+                </div>
+                <div class="stats-section">
+                    <div class="stat-item"><span class="stat-label">SCORE</span><span class="stat-value" id="score">0</span></div>
+                    <div class="stat-item"><span class="stat-label">LEVEL</span><span class="stat-value" id="level">1</span></div>
+                    <div class="stat-item"><span class="stat-label">LINES</span><span class="stat-value" id="lines">0</span></div>
+                    <div class="stat-item"><span class="stat-label">BEST</span> <span class="stat-value" id="high-score-display">0</span></div>
+                </div>
+            </div>
+
+            <div class="game-center-panel">
+                <canvas id="game-canvas" width="300" height="600"></canvas>
+
+                <!-- ポーズオーバーレイ -->
+                <div id="pause-overlay" class="pause-overlay hidden">
+                    <div class="pause-content">
+                        <h3>— PAUSE —</h3>
+                        <p>ゲームが一時停止されています</p>
+                        <div class="pause-buttons">
+                            <button id="resume-button" class="resume-button">再開</button>
+                            <button id="home-from-pause-button" class="home-button">ホームへ</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ゲームオーバー -->
+                <div id="game-over" class="game-over hidden">
+                    <div class="game-over-content">
+                        <h2>GAME OVER</h2>
+                        <div class="final-scores">
+                            <div class="score-item">
+                                <span class="score-label">最終スコア</span>
+                                <span class="score-value" id="final-score">0</span>
+                            </div>
+                            <div class="score-item">
+                                <span class="score-label">ハイスコア</span>
+                                <span class="score-value" id="final-high-score">0</span>
+                            </div>
+                        </div>
+                        <div class="game-over-ranking-container">
+                            <h3>🏆 TOP RANKERS</h3>
+                            <div id="game-over-ranking-list"></div>
+                        </div>
+                        <div class="game-over-buttons">
+                            <button id="restart-button" class="restart-button">もう一度</button>
+                            <button id="back-to-home-button" class="home-button">ホームへ</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="game-right-panel">
+                <div class="next-section">
+                    <div class="panel-title">NEXT</div>
+                    <canvas id="next-canvas" width="84" height="84"></canvas>
+                </div>
+                <div class="controls-section">
+                    <div class="panel-title">CONTROLS</div>
+                    <div class="controls-list">
+                        <div class="control-item"><span class="control-key" id="key-disp-move">←/→</span><span class="control-desc">移動</span></div>
+                        <div class="control-item"><span class="control-key" id="key-disp-rotateRight">↑</span><span class="control-desc">右回転</span></div>
+                        <div class="control-item"><span class="control-key" id="key-disp-rotateLeft">Alt</span><span class="control-desc">左回転</span></div>
+                        <div class="control-item"><span class="control-key" id="key-disp-down">↓</span><span class="control-desc">ソフト</span></div>
+                        <div class="control-item"><span class="control-key" id="key-disp-hardDrop">SPC</span><span class="control-desc">ハード</span></div>
+                        <div class="control-item"><span class="control-key" id="key-disp-hold">Ctrl</span><span class="control-desc">ホールド</span></div>
+                        <div class="control-item"><span class="control-key" id="key-disp-pause">P</span><span class="control-desc">ポーズ</span></div>
+                    </div>
                 </div>
             </div>
         </div>
-    </div>
 
-    <script src="./game.js"></script>
+        <!-- モバイルコントロール（ソロ用） -->
+        <div class="mobile-controls" id="mobile-controls">
+            <div class="m-row">
+                <button class="m-btn m-btn-small" id="m-hold">HOLD</button>
+                <button class="m-btn m-btn-small" id="m-up">↻</button>
+            </div>
+            <div class="m-row">
+                <button class="m-btn" id="m-left">←</button>
+                <button class="m-btn" id="m-down">↓</button>
+                <button class="m-btn" id="m-right">→</button>
+            </div>
+            <div class="m-row">
+                <button class="m-btn m-drop" id="m-drop">HARD DROP</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     ★ 対戦画面（最大4人）
+════════════════════════════════════════════════ -->
+<div id="battle-screen" class="screen">
+    <div class="battle-container">
+
+        <!-- バトルヘッダー：全プレイヤー + ラウンド -->
+        <div class="battle-header">
+            <button id="battle-menu-button" class="menu-button battle-exit-btn">
+                <i class="fas fa-sign-out-alt"></i> 退出
+            </button>
+            <!-- プレイヤーヘッダー（JSで動的生成） -->
+            <div id="battle-players-header" class="battle-players-header"></div>
+            <div id="battle-round-badge" class="battle-round-badge">Round 1</div>
+        </div>
+
+        <!-- ゲームコンテンツ（プレイヤー用） -->
+        <div class="battle-content" id="battle-game-content">
+
+            <!-- 左パネル：HOLD / 自分のStats / ゴミゲージ -->
+            <div class="battle-side-panel battle-my-panel">
+                <div class="hold-section">
+                    <div class="panel-title">HOLD</div>
+                    <canvas id="b-hold-canvas" width="84" height="84"></canvas>
+                </div>
+                <div class="battle-stats">
+                    <div class="battle-stat">
+                        <span class="stat-label">SCORE</span>
+                        <span class="stat-value" id="battle-my-score">0</span>
+                    </div>
+                    <div class="battle-stat">
+                        <span class="stat-label">LEVEL</span>
+                        <span class="stat-value" id="b-level">1</span>
+                    </div>
+                    <div class="battle-stat">
+                        <span class="stat-label">LINES</span>
+                        <span class="stat-value" id="b-lines">0</span>
+                    </div>
+                </div>
+                <div class="battle-gauge-section">
+                    <div class="gauge-item danger">
+                        <i class="fas fa-skull-crossbones"></i>
+                        <span>受信</span>
+                        <span class="gauge-value" id="garbage-count">0</span>
+                    </div>
+                    <div class="gauge-item attack">
+                        <i class="fas fa-bolt"></i>
+                        <span>攻撃</span>
+                        <span class="gauge-value" id="attack-count">0</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 中央：自分のゲームボード -->
+            <div class="battle-center">
+                <canvas id="b-game-canvas" width="300" height="600"></canvas>
+            </div>
+
+            <!-- 右パネル：NEXT + 相手ミニボード群（JSで動的生成） -->
+            <div class="battle-right-panel">
+                <div class="next-section">
+                    <div class="panel-title">NEXT</div>
+                    <canvas id="b-next-canvas" width="84" height="84"></canvas>
+                </div>
+                <!-- 相手プレイヤーのミニボード -->
+                <div id="opp-boards-container" class="opp-boards-container">
+                    <!-- JSで動的生成 -->
+                </div>
+            </div>
+        </div>
+
+        <!-- ★ 観戦オーバーレイ（spectatorモード） -->
+        <div id="spectate-overlay" class="spectate-overlay hidden">
+            <div class="spectate-header">
+                <span class="spectate-badge">👁&nbsp;SPECTATING</span>
+                <span id="spectate-round-txt" class="battle-round-badge" style="margin-left:0.5rem;"></span>
+            </div>
+            <div class="spectate-main">
+                <!-- 観戦ボード（JSで動的生成） -->
+                <div id="spectate-boards" class="spectate-boards"></div>
+                <!-- 観戦チャット -->
+                <div class="spectate-chat-panel">
+                    <div class="lobby-section-label">
+                        <i class="fas fa-comment"></i> チャット
+                    </div>
+                    <div class="lobby-chat-messages" id="spectate-chat-messages"></div>
+                    <div class="lobby-chat-row">
+                        <input type="text" id="spectate-chat-input" class="lobby-chat-input"
+                               placeholder="チャット..." maxlength="60">
+                        <button id="spectate-chat-send" class="lobby-send-btn">
+                            <i class="fas fa-paper-plane"></i>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 対戦結果オーバーレイ -->
+        <div id="battle-result-overlay" class="battle-result-overlay hidden">
+            <div class="battle-result-content">
+                <h2 id="battle-result-title">🎉 WIN!</h2>
+                <p id="battle-result-message">あなたの勝利です！</p>
+                <button id="battle-result-home" class="btn-primary-action" style="display:none;">
+                    <i class="fas fa-home"></i> ホームへ
+                </button>
+            </div>
+        </div>
+
+        <!-- モバイルコントロール（対戦用） -->
+        <div class="mobile-controls" id="battle-mobile-controls">
+            <div class="m-row">
+                <button class="m-btn m-btn-small" id="bm-hold">HOLD</button>
+                <button class="m-btn m-btn-small" id="bm-up">↻</button>
+            </div>
+            <div class="m-row">
+                <button class="m-btn" id="bm-left">←</button>
+                <button class="m-btn" id="bm-down">↓</button>
+                <button class="m-btn" id="bm-right">→</button>
+            </div>
+            <div class="m-row">
+                <button class="m-btn m-drop" id="bm-drop">HARD DROP</button>
+            </div>
+        </div>
+
+    </div><!-- /.battle-container -->
+</div><!-- /#battle-screen -->
+
+<script src="./game.js"></script>
 </body>
 </html>
