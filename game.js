@@ -2,13 +2,16 @@
 // RESTful Table API Helper
 // =========================================================
 const API = {
+    BASE_DELAY: 200,
     async get(table, params = {}) {
         const query = new URLSearchParams(params).toString();
         const res = await fetch(`tables/${table}?${query}`);
+        if (!res.ok) throw new Error(`GET ${table} ${res.status}`);
         return res.json();
     },
     async getOne(table, id) {
         const res = await fetch(`tables/${table}/${id}`);
+        if (!res.ok) throw new Error(`GET1 ${table}/${id} ${res.status}`);
         return res.json();
     },
     async post(table, data) {
@@ -16,6 +19,7 @@ const API = {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(data)
         });
+        if (!res.ok) throw new Error(`POST ${table} ${res.status}`);
         return res.json();
     },
     async patch(table, id, data) {
@@ -23,6 +27,7 @@ const API = {
             method: 'PATCH', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(data)
         });
+        if (!res.ok) throw new Error(`PATCH ${table}/${id} ${res.status}`);
         return res.json();
     },
     async delete(table, id) {
@@ -78,307 +83,206 @@ class Particle {
 }
 
 // =========================================================
-// MultiplayerManager — 先N勝制ラウンド管理
+// MultiplayerManager — 4人対応・ホスト権威モデル
 // =========================================================
 class MultiplayerManager {
+    // Board color encoding (index 0 = empty)
+    static C2I = {
+        '#00f5ff': 1, '#f5f500': 2, '#d400ff': 3, '#00e500': 4,
+        '#ff2020': 5, '#3366ff': 6, '#ff8c00': 7, '#888888': 8
+    };
+    static I2C = [0, '#00f5ff', '#f5f500', '#d400ff', '#00e500', '#ff2020', '#3366ff', '#ff8c00', '#888888'];
+
     constructor(game) {
-        this.game = game;
-        this.roomRecordId  = null;
-        this.roomCode      = null;
-        this.playerId      = game.userId;
-        this.isHost        = false;
-        this.pollTimer     = null;
+        this.game       = game;
+        this.roomId     = null;
+        this.roomCode   = null;
+        this.mySlot     = 0;   // 1–4
+        this.isHost     = false;
+        this.phase      = 'idle'; // idle | lobby | playing | finished
 
-        this.opponentBoard = [];
-        this.opponentScore = 0;
-        this.opponentAlive = true;
-        this.pendingGarbage = 0;
-        this.lastOppAtk    = 0;
-        this.opponentName  = '対戦相手';
-        this.startAt       = 0;
-
-        // 勝利管理
-        this.myWins     = 0;
-        this.oppWins    = 0;
-        this.maxWins    = 3;
+        // Round / wins
         this.roundNum   = 1;
-        this.lastRoundSeen = 0;
+        this.myWins     = 0;
+        this.settings   = { maxWins: 3, allowHold: true, garbageTarget: 'random' };
+
+        // Garbage tracking (race-free: per-sender cumulative totals)
+        this.pendingGarbage   = 0;
+        this._lastConsumed    = { 1: 0, 2: 0, 3: 0, 4: 0 };
+        this._myAttackTotal   = 0;
+        this._currentTarget   = 0;
+
+        // Poll state
+        this._pollTimer       = null;
+        this._pollInterval    = 1500;
+        this._pollInFlight    = false;
+
+        // Host round-end lock (prevents double-firing)
+        this._roundEndPending = false;
+
+        // Last fetched room snapshot
+        this._room            = null;
+
+        // Chat dedup
+        this._lastChatHash    = '';
+
+        // Board send throttle
+        this._lastBoardSendAt = 0;
     }
 
+    // ─── Room management ────────────────────────────────────
     async createRoom() {
+        const code = this._genCode();
         try {
-            const code = Math.random().toString(36).substring(2, 8).toUpperCase();
-            const room = await API.post('tetris_rooms', {
-                roomCode: code,
-                player1Id: this.playerId, player1Name: this.game.playerName,
-                player2Id: '', player2Name: '',
-                status: 'waiting',
-                p1Board: '[]', p2Board: '[]',
-                p1Score: 0, p2Score: 0,
-                p1Attack: 0, p2Attack: 0,
-                p1Alive: true, p2Alive: true,
-                p1Wins: 0, p2Wins: 0,
-                maxWins: this.game.matchMaxWins,
-                roundNum: 1,
-                startAt: 0,
-                winner: ''
-            });
-            this.roomRecordId = room.id;
+            const rec = await API.post('tetris_rooms', this._freshRoomData(code));
+            if (!rec?.id) throw new Error('no id');
+            this.roomId   = rec.id;
             this.roomCode = code;
-            this.isHost = true;
-            this.maxWins = this.game.matchMaxWins;
-            this._resetState();
-            this._startPoll();
-
-            document.getElementById('multiplayer-status').innerHTML =
-                `<div class="room-created">
-                    <p>ルームを作成しました！</p>
-                    <p class="room-code-display">${code}</p>
-                    <p style="font-size:0.8rem;opacity:0.7">このコードを対戦相手に伝えてください</p>
-                    <p style="font-size:0.8rem;color:#ffcc00;margin-top:8px">🔄 対戦相手を待っています...</p>
-                                        <p style="font-size:0.78rem;opacity:0.75">相手が入室したら「対戦を開始」を押してください</p>
-                </div>`;
-        　this.game.toggleHostStartButton(false);
+            this.mySlot   = 1;
+            this.isHost   = true;
+            this.phase    = 'lobby';
+            this._startPoll(1500);
+            this.game.switchScreen('lobby-screen');
+            this.game.initLobbyUI(code, true);
         } catch (e) {
-            document.getElementById('multiplayer-status').textContent = 'ルーム作成に失敗しました';
+            this.game.showToast('ルーム作成に失敗しました');
         }
     }
 
     async joinRoom(code) {
+        const upper = code.toUpperCase().trim();
+        if (!upper) { this.game.showToast('コードを入力してください'); return; }
         try {
-            const upper = code.toUpperCase();
-            const res = await API.get('tetris_rooms', { search: upper, limit: 50 });
-            const room = (res.data || []).find(r => r.roomCode === upper && r.status === 'waiting');
-            if (!room) { alert('ルームが見つからないか、既に満員です'); return; }
+            const res  = await API.get('tetris_rooms', { search: upper, limit: 50 });
+            const room = (res.data || []).find(r => r.roomCode === upper && r.status === 'lobby');
+            if (!room) { this.game.showToast('ルームが見つかりません（満員・開始済み）'); return; }
+
+            // Find first empty slot
+            let slot = 0;
+            for (let s = 2; s <= 4; s++) {
+                if (!room[`p${s}Id`]) { slot = s; break; }
+            }
+            if (!slot) { this.game.showToast('このルームは満員です'); return; }
 
             await API.patch('tetris_rooms', room.id, {
-                player2Id: this.playerId,
-                player2Name: this.game.playerName,
-                status: 'ready'
+                [`p${slot}Id`]:        this.game.userId,
+                [`p${slot}Name`]:      this.game.playerName,
+                [`p${slot}Ready`]:     false,
+                [`p${slot}Spectator`]: false,
             });
-            this.roomRecordId = room.id;
-            this.roomCode = upper;
-            this.isHost = false;
-            this.maxWins = room.maxWins || 3;
-            this.game.setMatchMaxWins(this.maxWins, false);
-            this._resetState();
-            this.startAt = 0;
-            this.opponentName = room.player1Name || '対戦相手';
-            this._startPoll();
 
-            document.getElementById('multiplayer-status').innerHTML =
-                `<p style="color:var(--green);">✅ ルームに参加しました！<br>対戦相手: <strong>${this.opponentName}</strong><br>主催者が開始するまで待機中です...</p>`;
-            this.game.toggleHostStartButton(false);
+            this.roomId   = room.id;
+            this.roomCode = upper;
+            this.mySlot   = slot;
+            this.isHost   = false;
+            this.phase    = 'lobby';
+            try { this.settings = { ...this.settings, ...JSON.parse(room.settings || '{}') }; } catch(_) {}
+            this._startPoll(1500);
+            this.game.switchScreen('lobby-screen');
+            this.game.initLobbyUI(upper, false);
         } catch (e) {
-            alert('ルームへの参加に失敗しました');
+            this.game.showToast('参加に失敗しました');
         }
     }
 
-    async startMatchByHost() {
-        if (!this.isHost || !this.roomRecordId) return;
-        const room = await API.getOne('tetris_rooms', this.roomRecordId).catch(() => null);
-        if (!room) return;
-        if (!room.player2Id) { this.game.showToast('まだ対戦相手が参加していません'); return; }
-        const startAt = Date.now() + 3000;
-        await API.patch('tetris_rooms', this.roomRecordId, { status: 'starting', startAt }).catch(() => {});
-        this.startAt = startAt;
-        this.game.toggleHostStartButton(false);
+    async leaveRoom() {
+        this.stopPoll();
+        if (this.roomId) {
+            if (this.isHost) {
+                API.patch('tetris_rooms', this.roomId, { status: 'abandoned' }).catch(() => {});
+            } else {
+                const slot = this.mySlot;
+                API.patch('tetris_rooms', this.roomId, {
+                    [`p${slot}Id`]:    '',
+                    [`p${slot}Name`]:  '',
+                    [`p${slot}Ready`]: false,
+                }).catch(() => {});
+            }
+        }
+        this._reset();
     }
 
-    _startPoll() {
-        if (this.pollTimer) clearInterval(this.pollTimer);
-         this.pollTimer = setInterval(() => this._poll(), 60);
+    // ─── Lobby ops ───────────────────────────────────────────
+    async setReady(ready) {
+        if (!this.roomId) return;
+        await API.patch('tetris_rooms', this.roomId, {
+            [`p${this.mySlot}Ready`]: ready
+        }).catch(() => {});
     }
 
-    stopPoll() {
-        if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null; }
+    async setSpectator(spectator) {
+        if (!this.roomId) return;
+        await API.patch('tetris_rooms', this.roomId, {
+            [`p${this.mySlot}Spectator`]: spectator,
+            [`p${this.mySlot}Ready`]:     spectator ? true : false,
+        }).catch(() => {});
     }
 
-    async _poll() {
-        if (!this.roomRecordId) return;
+    async sendChat(text) {
+        if (!this.roomId || !text.trim()) return;
         try {
-            const room = await API.getOne('tetris_rooms', this.roomRecordId);
-            if (!room) return;
-
-            const status = room.status;
-            this.myWins  = this.isHost ? (room.p1Wins || 0) : (room.p2Wins || 0);
-            this.oppWins = this.isHost ? (room.p2Wins || 0) : (room.p1Wins || 0);
-            this.maxWins = room.maxWins || 3;
-            this.game.setMatchMaxWins(this.maxWins, false);
-            this.opponentName = this.isHost ? (room.player2Name || '対戦相手') : (room.player1Name || '対戦相手');
-            this.startAt = room.startAt || 0;
-            this.game.updateOpponentName(this.opponentName);
-
-            const statusEl = document.getElementById('multiplayer-status');
-            if (!this.game.mpActive && statusEl) {
-                if (status === 'waiting') {
-                    statusEl.innerHTML = `<p style="color:#ffcc00;">🔄 対戦相手を待っています...</p>`;
-                } else if (status === 'ready') {
-                    statusEl.innerHTML = this.isHost
-                        ? `<p style="color:var(--green);">✅ 対戦相手: <strong>${this.opponentName}</strong><br>開始ボタンで試合を始めてください</p>`
-                        : `<p style="color:var(--cyan);">対戦相手: <strong>${this.opponentName}</strong><br>主催者が開始するまで待機中です...</p>`;
-                }
-            }
-            if (!this.game.mpActive) this.game.toggleHostStartButton(this.isHost && status === 'ready');
-
-            if (status === 'starting') {
-                this.game.toggleHostStartButton(false);
-                const remains = Math.max(0, Math.ceil((this.startAt - Date.now()) / 1000));
-                if (statusEl && !this.game.mpActive) {
-                    statusEl.innerHTML = `<p style="color:var(--cyan);">対戦相手: <strong>${this.opponentName}</strong><br>⏳ ${remains}秒後に開始</p>`;
-                }
-                if (Date.now() >= this.startAt) {
-                    if (this.isHost) {
-                        await API.patch('tetris_rooms', this.roomRecordId, { status: 'playing' }).catch(() => {});
-                    }
-                    if (!this.game.mpActive) {
-                        this.lastRoundSeen = room.roundNum || 1;
-                        this.roundNum = this.lastRoundSeen;
-                        this.game.beginMultiplayer();
-                    }
-                }
-                return;
-            }
-
-            if (status === 'abandoned') {
-                this.game.showToast('⚠️ 相手が退出しました');
-                this.cleanup();
-                this.game.forceEndMultiplayer();
-                return;
-            }
-
-            // ホストがゲスト参加を検知して最初のゲーム開始
-            if (this.isHost && status === 'playing' && !this.game.mpActive) {
-                this.lastRoundSeen = room.roundNum || 1;
-                this.roundNum = this.lastRoundSeen;
-                this.game.beginMultiplayer();
-                return;
-            }
-
-            if (status === 'playing') {
-                const dbRound = room.roundNum || 1;
-
-                // 新ラウンド検知
-                if (dbRound > this.lastRoundSeen && this.lastRoundSeen > 0 && !this.game.gameRunning) {
-                    this.lastRoundSeen = dbRound;
-                    this.roundNum = dbRound;
-                    this.opponentAlive = true;
-                    this.pendingGarbage = 0;
-                    this.lastOppAtk = 0;
-                    this.game.beginNextRound();
-                    return;
-                }
-                if (this.lastRoundSeen === 0) this.lastRoundSeen = dbRound;
-
-                const bKey = this.isHost ? 'p2Board'  : 'p1Board';
-                const sKey = this.isHost ? 'p2Score'  : 'p1Score';
-                const aKey = this.isHost ? 'p2Alive'  : 'p1Alive';
-                const kKey = this.isHost ? 'p2Attack' : 'p1Attack';
-
-                try { this.opponentBoard = JSON.parse(room[bKey] || '[]'); } catch (_) {}
-                this.opponentScore = room[sKey] || 0;
-
-                // 相手死亡
-                if (room[aKey] === false && this.opponentAlive && this.game.gameRunning) {
-                    this.opponentAlive = false;
-                    if (this.myWins >= this.maxWins) {
-                        this.stopPoll();
-                        this.game.onSeriesEnd(true);
-                    } else {
-                        this.game.onRoundWon();
-                    }
-                    return;
-                }
-
-                // 攻撃受信
-                const oppAtk = room[kKey] || 0;
-                if (oppAtk > this.lastOppAtk) {
-                    this.pendingGarbage += (oppAtk - this.lastOppAtk);
-                    this.lastOppAtk = oppAtk;
-                }
-                return;
-            }
-
-            if (status === 'finished' && !this.game.seriesDone) {
-                const iWon = this.myWins >= this.maxWins;
-                this.stopPoll();
-                this.game.onSeriesEnd(iWon);
-            }
-        } catch (_) {}
+            const room = this._room || await API.getOne('tetris_rooms', this.roomId);
+            const key  = `p${this.mySlot}Chat`;
+            let msgs = [];
+            try { msgs = JSON.parse(room[key] || '[]'); } catch(_) {}
+            msgs.push({ n: this.game.playerName, t: text.trim(), ts: Date.now() });
+            if (msgs.length > 8) msgs = msgs.slice(-8);
+            await API.patch('tetris_rooms', this.roomId, { [key]: JSON.stringify(msgs) });
+        } catch(e) {}
     }
 
+    async applySettings(s) {
+        if (!this.isHost || !this.roomId) return;
+        this.settings = { ...this.settings, ...s };
+        await API.patch('tetris_rooms', this.roomId, {
+            settings: JSON.stringify(this.settings)
+        }).catch(() => {});
+    }
+
+    async startMatch() {
+        if (!this.isHost || !this.roomId) return;
+        try {
+            const room = await API.getOne('tetris_rooms', this.roomId);
+            const gamers = this._gamers(room);
+            if (gamers.length < 2) { this.game.showToast('2人以上の参加者が必要です'); return; }
+            const notReady = gamers.filter(s => !room[`p${s}Spectator`] && !room[`p${s}Ready`]);
+            if (notReady.length) { this.game.showToast('全員が準備完了にしてください'); return; }
+            const startAt = Date.now() + 3500;
+            await API.patch('tetris_rooms', this.roomId, { status: 'starting', startAt });
+        } catch(e) {
+            this.game.showToast('開始に失敗しました');
+        }
+    }
+
+    // ─── Game ops ───────────────────────────────────────────
     async sendBoard(board, score) {
-        if (!this.roomRecordId) return;
-        try {
-            const k = this.isHost ? 'p1' : 'p2';
-            await API.patch('tetris_rooms', this.roomRecordId, {
-                [`${k}Board`]: JSON.stringify(board), [`${k}Score`]: score
-            });
-        } catch (_) {}
+        if (!this.roomId || this.phase !== 'playing') return;
+        const now = Date.now();
+        if (now - this._lastBoardSendAt < 120) return; // throttle 120ms
+        this._lastBoardSendAt = now;
+        await API.patch('tetris_rooms', this.roomId, {
+            [`p${this.mySlot}Board`]: this._encodeBoard(board),
+            [`p${this.mySlot}Score`]: score,
+        }).catch(() => {});
     }
 
     async sendAttack(lines) {
-        if (!this.roomRecordId || lines <= 0) return;
-        try {
-            const room = await API.getOne('tetris_rooms', this.roomRecordId);
-            const k = this.isHost ? 'p1Attack' : 'p2Attack';
-            await API.patch('tetris_rooms', this.roomRecordId, { [k]: (room[k] || 0) + lines });
-        } catch (_) {}
+        if (!this.roomId || lines <= 0 || !this._room) return;
+        const target = this._pickTarget(this._room);
+        if (!target) return;
+        this._currentTarget = target;
+        this._myAttackTotal += lines;
+        await API.patch('tetris_rooms', this.roomId, {
+            [`p${this.mySlot}Attack`]: this._myAttackTotal,
+            [`p${this.mySlot}Target`]: target,
+        }).catch(() => {});
     }
 
     async notifyDeath() {
-        if (!this.roomRecordId) return { seriesOver: false };
-        try {
-            const room     = await API.getOne('tetris_rooms', this.roomRecordId);
-            const myAliveK = this.isHost ? 'p1Alive' : 'p2Alive';
-            const oppWinsK = this.isHost ? 'p2Wins'  : 'p1Wins';
-            const myWinsK  = this.isHost ? 'p1Wins'  : 'p2Wins';
-
-            const newOppWins = (room[oppWinsK] || 0) + 1;
-            const seriesOver = newOppWins >= (room.maxWins || 3);
-            const patch = { [myAliveK]: false, [oppWinsK]: newOppWins };
-
-            if (seriesOver) {
-                const oppIdK = this.isHost ? 'player2Id' : 'player1Id';
-                patch.status = 'finished';
-                patch.winner = room[oppIdK] || '';
-            } else {
-                patch.status = 'roundOver';
-            }
-
-            await API.patch('tetris_rooms', this.roomRecordId, patch);
-            this.oppWins = newOppWins;
-            this.myWins  = room[myWinsK] || 0;
-            return { seriesOver, myWins: this.myWins, oppWins: newOppWins };
-        } catch (_) {
-            return { seriesOver: false };
-        }
-    }
-
-    async hostStartNextRound() {
-        if (!this.isHost || !this.roomRecordId) return;
-        const next = this.roundNum + 1;
-        this.roundNum = next;
-        this.lastRoundSeen = next;
-        this.opponentAlive = true;
-        this.pendingGarbage = 0;
-        this.lastOppAtk = 0;
-
-        await API.patch('tetris_rooms', this.roomRecordId, {
-            status: 'playing', roundNum: next,
-            p1Board: '[]', p2Board: '[]',
-            p1Score: 0, p2Score: 0,
-            p1Attack: 0, p2Attack: 0,
-            p1Alive: true, p2Alive: true
+        if (!this.roomId) return;
+        await API.patch('tetris_rooms', this.roomId, {
+            [`p${this.mySlot}Alive`]: false,
         }).catch(() => {});
-
-        this.game.beginNextRound();
-    }
-
-    consumeGarbage() {
-        const g = Math.min(this.pendingGarbage, 8);
-        this.pendingGarbage -= g;
-        return g;
     }
 
     cancelGarbage(atk) {
@@ -390,20 +294,314 @@ class MultiplayerManager {
         return atk;
     }
 
-    cleanup() {
-        this.stopPoll();
-        this.roomRecordId = null; this.roomCode = null; this.isHost = false;
-        this.opponentBoard = []; this.opponentScore = 0; this.opponentAlive = true;
-        this.pendingGarbage = 0; this.lastOppAtk = 0;
-        this.myWins = 0; this.oppWins = 0; this.roundNum = 1; this.lastRoundSeen = 0;
-        this.opponentName = '対戦相手'; this.startAt = 0;
-        this.game.toggleHostStartButton(false);
+    consumeGarbage() {
+        const g = Math.min(this.pendingGarbage, 8);
+        this.pendingGarbage -= g;
+        return g;
     }
 
-    _resetState() {
-        this.myWins = 0; this.oppWins = 0; this.roundNum = 1; this.lastRoundSeen = 0;
-        this.opponentAlive = true; this.pendingGarbage = 0; this.lastOppAtk = 0;
-                this.startAt = 0;
+    // ─── Polling ─────────────────────────────────────────────
+    _startPoll(ms = 1500) {
+        this.stopPoll();
+        this._pollInterval = ms;
+        this._pollTimer = setInterval(() => this._poll(), ms);
+    }
+
+    _setPollInterval(ms) {
+        if (this._pollInterval === ms) return;
+        this._startPoll(ms);
+    }
+
+    stopPoll() {
+        if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
+    }
+
+    async _poll() {
+        if (!this.roomId || this._pollInFlight) return;
+        this._pollInFlight = true;
+        try {
+            const room = await API.getOne('tetris_rooms', this.roomId);
+            if (!room) return;
+            this._room = room;
+
+            const status = room.status;
+
+            // ── Abandoned ──
+            if (status === 'abandoned') {
+                this.game.showToast('部屋が終了しました');
+                this.cleanup();
+                this.game.onMultiplayerAbandoned();
+                return;
+            }
+
+            // Load settings
+            try {
+                const s = JSON.parse(room.settings || '{}');
+                if (Object.keys(s).length) this.settings = { ...this.settings, ...s };
+            } catch(_) {}
+
+            // ── LOBBY phase ─────────────────────────────────
+            if (this.phase === 'lobby') {
+                this.game.renderLobby(room);
+
+                if (status === 'starting') {
+                    this._setPollInterval(600);
+                    const remain = Math.max(0, Math.ceil((room.startAt - Date.now()) / 1000));
+                    this.game.updateLobbyCountdown(remain);
+
+                    if (Date.now() >= room.startAt) {
+                        if (this.isHost) {
+                            // Patch to playing with reset game state for round 1
+                            await API.patch('tetris_rooms', this.roomId,
+                                this._roundStartPatch(room, 1)).catch(() => {});
+                        }
+                        this._beginPlayingPhase(room);
+                    }
+                }
+                return;
+            }
+
+            // ── PLAYING phase ────────────────────────────────
+            if (this.phase === 'playing') {
+                // New round detection
+                const dbRound = parseInt(room.roundNum) || 1;
+                if (dbRound > this.roundNum && !this.game.gameRunning) {
+                    this.roundNum = dbRound;
+                    this._resetRound();
+                    this.game.beginNextRound();
+                    return;
+                }
+
+                // Update opponent boards for rendering
+                this.game._updateOpponents(room);
+
+                // Compute incoming garbage
+                if (this.game.gameRunning && !this.game.mySpectator) {
+                    this._computeGarbage(room);
+                }
+
+                // HOST: detect round end
+                if (this.isHost && status === 'playing' && !this._roundEndPending) {
+                    const gamers = this._gamers(room);
+                    if (gamers.length >= 2) {
+                        const living = gamers.filter(s =>
+                            room[`p${s}Alive`] === true || room[`p${s}Alive`] === 'true');
+                        if (living.length <= 1) {
+                            this._roundEndPending = true;
+                            await this._resolveRound(room, living[0] || null);
+                        }
+                    }
+                }
+
+                if (status === 'finished') {
+                    const myWins = parseInt(room[`p${this.mySlot}Wins`]) || 0;
+                    const iWon   = String(room.winner) === String(this.mySlot);
+                    this.stopPoll();
+                    this.phase = 'finished';
+                    this.game.onSeriesEnd(iWon, room);
+                }
+            }
+        } catch(e) {
+            // Silently ignore transient network errors
+        } finally {
+            this._pollInFlight = false;
+        }
+    }
+
+    // ─── Internal helpers ────────────────────────────────────
+    _activePlayers(room) {
+        const slots = [];
+        for (let s = 1; s <= 4; s++) if (room[`p${s}Id`]) slots.push(s);
+        return slots;
+    }
+
+    _gamers(room) {
+        return this._activePlayers(room).filter(s => !room[`p${s}Spectator`]);
+    }
+
+    _getLivingOpponentSlots(room) {
+        return this._gamers(room).filter(s =>
+            s !== this.mySlot &&
+            (room[`p${s}Alive`] === true || room[`p${s}Alive`] === 'true'));
+    }
+
+    _computeGarbage(room) {
+        for (let s = 1; s <= 4; s++) {
+            if (s === this.mySlot || !room[`p${s}Id`]) continue;
+            if (parseInt(room[`p${s}Target`] || 0) !== this.mySlot) continue;
+            const sent     = parseInt(room[`p${s}Attack`] || 0);
+            const consumed = this._lastConsumed[s] || 0;
+            if (sent > consumed) {
+                this.pendingGarbage += sent - consumed;
+                this._lastConsumed[s] = sent;
+            }
+        }
+    }
+
+    _pickTarget(room) {
+        const living = this._getLivingOpponentSlots(room);
+        if (!living.length) return 0;
+        const mode = this.settings.garbageTarget || 'random';
+        if (mode === 'top') {
+            let best = living[0], best_sc = -1;
+            for (const s of living) {
+                const sc = parseInt(room[`p${s}Score`] || 0);
+                if (sc > best_sc) { best_sc = sc; best = s; }
+            }
+            return best;
+        }
+        if (mode === 'bottom') {
+            let worst = living[0], worst_sc = Infinity;
+            for (const s of living) {
+                const sc = parseInt(room[`p${s}Score`] || 0);
+                if (sc < worst_sc) { worst_sc = sc; worst = s; }
+            }
+            return worst;
+        }
+        // random: keep current if still alive
+        if (living.includes(this._currentTarget)) return this._currentTarget;
+        return living[Math.floor(Math.random() * living.length)];
+    }
+
+    _beginPlayingPhase(room) {
+        this._myAttackTotal  = 0;
+        this._lastConsumed   = { 1: 0, 2: 0, 3: 0, 4: 0 };
+        this.pendingGarbage  = 0;
+        this.roundNum        = 1;
+        this._roundEndPending = false;
+        this.phase           = 'playing';
+        this._setPollInterval(350);
+        this.game.beginMultiplayer(room);
+    }
+
+    async _resolveRound(room, winnerSlot) {
+        const maxWins = this.settings.maxWins || 3;
+        const patch   = {};
+        let seriesOver = false;
+
+        if (winnerSlot) {
+            const prevWins = parseInt(room[`p${winnerSlot}Wins`] || 0);
+            const newWins  = prevWins + 1;
+            patch[`p${winnerSlot}Wins`] = newWins;
+            if (newWins >= maxWins) {
+                seriesOver = true;
+                patch.winner = String(winnerSlot);
+            }
+        }
+        patch.status = seriesOver ? 'finished' : 'roundOver';
+        await API.patch('tetris_rooms', this.roomId, patch).catch(() => {});
+
+        if (!seriesOver) {
+            const nextRound = this.roundNum + 1;
+            setTimeout(async () => {
+                if (!this.roomId) return;
+                await API.patch('tetris_rooms', this.roomId,
+                    this._roundStartPatch(room, nextRound)).catch(() => {});
+                this._roundEndPending = false;
+            }, 3500);
+        } else {
+            this._roundEndPending = false;
+        }
+    }
+
+    _roundStartPatch(room, roundNum) {
+        const patch = { status: 'playing', roundNum };
+        for (let s = 1; s <= 4; s++) {
+            if (!room[`p${s}Id`]) continue;
+            patch[`p${s}Board`]  = '';
+            patch[`p${s}Score`]  = 0;
+            patch[`p${s}Attack`] = 0;
+            patch[`p${s}Target`] = 0;
+            patch[`p${s}Alive`]  = !room[`p${s}Spectator`];
+        }
+        return patch;
+    }
+
+    _resetRound() {
+        this._lastConsumed    = { 1: 0, 2: 0, 3: 0, 4: 0 };
+        this.pendingGarbage   = 0;
+        this._myAttackTotal   = 0;
+        this._currentTarget   = 0;
+        this._roundEndPending = false;
+    }
+
+    mergeChat(room) {
+        const all = [];
+        for (let s = 1; s <= 4; s++) {
+            try {
+                const msgs = JSON.parse(room[`p${s}Chat`] || '[]');
+                all.push(...msgs);
+            } catch(_) {}
+        }
+        return all.sort((a, b) => (a.ts || 0) - (b.ts || 0)).slice(-24);
+    }
+
+    _encodeBoard(board) {
+        return board.flat().map(c => MultiplayerManager.C2I[c] || 0).join('');
+    }
+
+    _decodeBoard(s) {
+        if (!s || s.length < 200) return null;
+        const board = [];
+        for (let y = 0; y < 20; y++) {
+            board.push([]);
+            for (let x = 0; x < 10; x++) {
+                const idx = parseInt(s[y * 10 + x]) || 0;
+                board[y].push(idx ? MultiplayerManager.I2C[idx] : 0);
+            }
+        }
+        return board;
+    }
+
+    _genCode() {
+        return Math.random().toString(36).substring(2, 8).toUpperCase();
+    }
+
+    _freshRoomData(code) {
+        const blank = (s, fillId = false) => ({
+            [`p${s}Id`]:        fillId ? this.game.userId : '',
+            [`p${s}Name`]:      fillId ? this.game.playerName : '',
+            [`p${s}Ready`]:     false,
+            [`p${s}Spectator`]: false,
+            [`p${s}Alive`]:     true,
+            [`p${s}Wins`]:      0,
+            [`p${s}Score`]:     0,
+            [`p${s}Board`]:     '',
+            [`p${s}Attack`]:    0,
+            [`p${s}Target`]:    0,
+            [`p${s}Chat`]:      '[]',
+        });
+        return {
+            roomCode: code, hostId: this.game.userId,
+            status: 'lobby',
+            settings: JSON.stringify({ maxWins: 3, allowHold: true, garbageTarget: 'random' }),
+            roundNum: 1, startAt: 0, winner: '',
+            ...blank(1, true), ...blank(2), ...blank(3), ...blank(4),
+        };
+    }
+
+    _reset() {
+        this.roomId            = null;
+        this.roomCode          = null;
+        this.mySlot            = 0;
+        this.isHost            = false;
+        this.phase             = 'idle';
+        this.roundNum          = 1;
+        this.myWins            = 0;
+        this._myAttackTotal    = 0;
+        this._lastConsumed     = { 1: 0, 2: 0, 3: 0, 4: 0 };
+        this.pendingGarbage    = 0;
+        this._currentTarget    = 0;
+        this._roundEndPending  = false;
+        this._room             = null;
+        this._lastChatHash     = '';
+        this._lastBoardSendAt  = 0;
+        this.settings          = { maxWins: 3, allowHold: true, garbageTarget: 'random' };
+    }
+
+    cleanup() {
+        this.stopPoll();
+        this._reset();
     }
 }
 
@@ -452,10 +650,10 @@ class Tetris {
                 hardDrop:  new Audio('./sounds/hard-drop.mp3'),
                 land:      new Audio('./sounds/soft-drop.mp3')
             };
-            Object.values(this.sounds).forEach(s => { try { s.load(); s.volume = 0.3; } catch (_) {} });
+            Object.values(this.sounds).forEach(s => { try { s.load(); s.volume = 0.3; } catch(_) {} });
             this.sounds.hardDrop.volume = 0.25;
             this.sounds.land.volume     = 0.4;
-        } catch (_) { this.sounds = {}; }
+        } catch(_) { this.sounds = {}; }
 
         this.controls = JSON.parse(localStorage.getItem('tetrisControls')) || {
             left: 'ArrowLeft', right: 'ArrowRight', down: 'ArrowDown',
@@ -472,26 +670,30 @@ class Tetris {
         this.difficulty    = localStorage.getItem('tetrisDifficulty')             || 'normal';
         this.currentTheme  = localStorage.getItem('tetrisTheme')                  || 'dark';
         this.gameStartTime = 0;
-        this.matchMaxWins  = parseInt(localStorage.getItem('tetrisMatchMaxWins') || '3');
+
         this.userId = localStorage.getItem('tetrisUserId') || (() => {
             const id = 'u_' + Math.random().toString(36).slice(2, 9) + Date.now();
             localStorage.setItem('tetrisUserId', id); return id;
         })();
-              this.rankingUserKey = this._buildRankingUserKey();
+        this.rankingUserKey      = this._buildRankingUserKey();
         this.rankingFetchInFlight = false;
-        this.lastRankingFetchAt = 0;
+        this.lastRankingFetchAt   = 0;
 
-        this.mp        = new MultiplayerManager(this);
-        this.mpActive  = false;
-        this.seriesDone= false;
-        this.lastBoardSend = 0;
+        this.mp          = new MultiplayerManager(this);
+        this.mpActive    = false;
+        this.mySpectator = false;
+        this.seriesDone  = false;
+
+        // Mini board canvases for opponents (slot → canvas)
+        this._oppCanvases = {};
 
         this._init();
     }
 
-    // =====================================================
+    // ─────────────────────────────────────────────────────────
     _init() {
         this._bindUI();
+        this._bindLobbyUI();
         this._bindMobile('m-');
         this.spawnPiece();
         this.setTheme(this.currentTheme);
@@ -500,17 +702,18 @@ class Tetris {
         this._updateHomeStats();
         this._refreshControlsUI();
         this._normalizeMatchSettings();
-        this._updateMatchSettingsUI();
         this.fetchRanking(true);
         setInterval(() => {
-            if (document.getElementById('home-screen').classList.contains('active')) this.fetchRanking(true);
+            if (document.getElementById('home-screen').classList.contains('active')) {
+                this.fetchRanking(true);
+            }
         }, 10000);
     }
 
     playSound(snd) {
         if (!snd || !this.audioOK) return;
         try { snd.currentTime = 0; const p = snd.play(); if (p) p.catch(() => { this.audioOK = false; }); }
-        catch (_) { this.audioOK = false; }
+        catch(_) { this.audioOK = false; }
     }
 
     showToast(msg) {
@@ -532,7 +735,6 @@ class Tetris {
         if (id === 'online-screen') {
             const inp = document.getElementById('player-name-input');
             if (inp) inp.value = this.playerName;
-                this._updateMatchSettingsUI();
         }
         if (id === 'settings-screen') {
             this._updateDiffUI(); this._updateThemeUI(); this._setupKeyConfig();
@@ -546,7 +748,6 @@ class Tetris {
         if (r) r.style.display = this.gameRunning ? 'flex' : 'none';
         this.fetchRanking(true);
         this._normalizeMatchSettings();
-        this._updateMatchSettingsUI();
     }
 
     _on(id, fn) { const el = document.getElementById(id); if (el) el.addEventListener('click', fn.bind(this)); }
@@ -564,7 +765,7 @@ class Tetris {
         this._on('back-to-home-from-ranking',  () => this.showHome());
         this._on('back-to-home-from-opening',  () => this.showHome());
         this._on('back-to-home-from-settings', () => this.showHome());
-        this._on('back-to-home-from-online',   () => { this.mp.cleanup(); this.showHome(); });
+        this._on('back-to-home-from-online',   () => this.showHome());
         this._on('easy-mode',                  () => this.setDifficulty('easy'));
         this._on('normal-mode',                () => this.setDifficulty('normal'));
         this._on('hard-mode',                  () => this.setDifficulty('hard'));
@@ -576,15 +777,15 @@ class Tetris {
             this.showHome();
         });
         this._on('save-name-button',           () => this._saveName());
-        this._on('create-room-button',         () => this.mp.createRoom());
-        this._on('host-start-button',          () => this.mp.startMatchByHost());
-        const maxWinsSelect = document.getElementById('max-wins-select');
-        if (maxWinsSelect) {
-            maxWinsSelect.addEventListener('change', e => this.setMatchMaxWins(parseInt(e.target.value || '3')));
-        }
+        this._on('create-room-button',         () => {
+            this._saveName();
+            this.mp.createRoom();
+        });
         this._on('join-room-button',           () => {
-            const code = document.getElementById('room-code-input').value.trim();
-            if (code) this.mp.joinRoom(code); else alert('ルームコードを入力してください');
+            this._saveName();
+            const code = document.getElementById('room-code-input')?.value.trim();
+            if (code) this.mp.joinRoom(code);
+            else this.showToast('コードを入力してください');
         });
         this._on('start-button',               () => { this.mpActive = false; this.resetGame(); this.startSolo(); });
         this._on('restart-button',             () => { this.mpActive = false; this.resetGame(); this.startSolo(); });
@@ -592,24 +793,9 @@ class Tetris {
             this.isPaused = true;
             const ov = document.getElementById('pause-overlay');
             if (ov) ov.classList.remove('hidden');
-            this.showHome();
         });
-        this._on('battle-menu-button', () => {
-            if (this.mp.roomRecordId) API.patch('tetris_rooms', this.mp.roomRecordId, { status: 'abandoned' }).catch(() => {});
-            this.mp.cleanup();
-            this.mpActive = false; this.seriesDone = false; this.gameRunning = false;
-            this._swapCanvas('solo');
-            this.showHome();
-        });
-        this._on('battle-result-home', () => {
-            if (this.mp.roomRecordId) API.patch('tetris_rooms', this.mp.roomRecordId, { status: 'abandoned' }).catch(() => {});
-            this.mp.cleanup();
-            this.mpActive = false; this.seriesDone = false; this.gameRunning = false;
-            this._swapCanvas('solo');
-            const ov = document.getElementById('battle-result-overlay');
-            if (ov) ov.classList.add('hidden');
-            this.showHome();
-        });
+        this._on('battle-menu-button', () => this._exitBattle());
+        this._on('battle-result-home', () => this._exitBattle());
 
         ['easy','normal','hard'].forEach(d => {
             this._on(`${d}-mode-settings`, () => {
@@ -631,19 +817,76 @@ class Tetris {
         document.addEventListener('keyup', e => this._kUp(e.code));
     }
 
-    _swapCanvas(mode) {
-        if (mode === 'battle') {
-            this.canvas     = document.getElementById('b-game-canvas');
-            this.nextCanvas = document.getElementById('b-next-canvas');
-            this.holdCanvas = document.getElementById('b-hold-canvas');
-        } else {
-            this.canvas     = document.getElementById('game-canvas');
-            this.nextCanvas = document.getElementById('next-canvas');
-            this.holdCanvas = document.getElementById('hold-canvas');
+    _bindLobbyUI() {
+        this._on('lobby-leave-btn',       () => { this.mp.leaveRoom(); this.showHome(); });
+        this._on('lobby-copy-code-btn',   () => {
+            const code = this.mp.roomCode || '';
+            if (navigator.clipboard) navigator.clipboard.writeText(code).then(() => this.showToast('コードをコピーしました'));
+            else this.showToast(code);
+        });
+        this._on('lobby-ready-btn',       () => {
+            const room = this.mp._room;
+            const cur  = room ? !!room[`p${this.mp.mySlot}Ready`] : false;
+            this.mp.setReady(!cur);
+        });
+        this._on('lobby-spectate-btn',    () => {
+            const room = this.mp._room;
+            const cur  = room ? !!room[`p${this.mp.mySlot}Spectator`] : false;
+            this.mp.setSpectator(!cur);
+        });
+        this._on('lobby-start-btn',       () => this.mp.startMatch());
+
+        // Settings selects (host only)
+        ['lobby-max-wins-sel', 'lobby-hold-sel', 'lobby-target-sel'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.addEventListener('change', () => this._applyLobbySettings());
+        });
+
+        // Chat
+        this._on('lobby-chat-send-btn', () => this._sendLobbyChat('lobby-chat-input'));
+        const ci = document.getElementById('lobby-chat-input');
+        if (ci) ci.addEventListener('keydown', e => { if (e.key === 'Enter') this._sendLobbyChat('lobby-chat-input'); });
+
+        // Spectator chat
+        this._on('spectate-chat-send', () => this._sendLobbyChat('spectate-chat-input'));
+        const sc = document.getElementById('spectate-chat-input');
+        if (sc) sc.addEventListener('keydown', e => { if (e.key === 'Enter') this._sendLobbyChat('spectate-chat-input'); });
+    }
+
+    _sendLobbyChat(inputId) {
+        const el = document.getElementById(inputId);
+        if (!el) return;
+        const text = el.value.trim();
+        if (!text) return;
+        this.mp.sendChat(text);
+        el.value = '';
+    }
+
+    _applyLobbySettings() {
+        if (!this.mp.isHost) return;
+        const mw = document.getElementById('lobby-max-wins-sel');
+        const ah = document.getElementById('lobby-hold-sel');
+        const tg = document.getElementById('lobby-target-sel');
+        this.mp.applySettings({
+            maxWins:       parseInt(mw?.value || '3'),
+            allowHold:     ah?.value === '1',
+            garbageTarget: tg?.value || 'random',
+        });
+    }
+
+    _exitBattle() {
+        if (this.mp.roomId) {
+            API.patch('tetris_rooms', this.mp.roomId, { status: 'abandoned' }).catch(() => {});
         }
-        this.ctx     = this.canvas.getContext('2d');
-        this.nextCtx = this.nextCanvas.getContext('2d');
-        this.holdCtx = this.holdCanvas.getContext('2d');
+        this.mp.cleanup();
+        this.mpActive    = false;
+        this.mySpectator = false;
+        this.seriesDone  = false;
+        this.gameRunning = false;
+        this._swapCanvas('solo');
+        const ov = document.getElementById('battle-result-overlay');
+        if (ov) ov.classList.add('hidden');
+        this.showHome();
     }
 
     _bindMobile(prefix) {
@@ -677,6 +920,7 @@ class Tetris {
             }
         }
     }
+
     _kUp(code) {
         this.keyStates[code] = false;
         clearTimeout(this.activeTimers[code]); clearInterval(this.activeTimers[code]);
@@ -685,30 +929,192 @@ class Tetris {
         if (code === this.controls.hold || code === 'ControlRight' || code === 'KeyC') this.keyStates['hldf'] = false;
         if (code === this.controls.down) this.isSoftDrop = false;
     }
+
     _exec(code) {
         if (code === this.controls.left)        { this.movePiece(-1, 0); this.lastAction = 'move'; }
         if (code === this.controls.right)       { this.movePiece(1,  0); this.lastAction = 'move'; }
         if (code === this.controls.down)        { this.isSoftDrop = true; this.movePiece(0, 1); this.lastAction = 'move'; }
         if (code === this.controls.rotateRight) this._rotate('right');
         if (code === this.controls.rotateLeft)  this._rotate('left');
-        if (code === this.controls.hardDrop && !this.keyStates['hdf']) { this.hardDrop(); this.keyStates['hdf'] = true; this.lastAction = 'drop'; }
-        if ((code === this.controls.hold || code === 'ControlRight' || code === 'KeyC') && !this.keyStates['hldf']) { this.holdPiece(); this.keyStates['hldf'] = true; }
+        if (code === this.controls.hardDrop && !this.keyStates['hdf']) {
+            this.hardDrop(); this.keyStates['hdf'] = true; this.lastAction = 'drop';
+        }
+        if ((code === this.controls.hold || code === 'ControlRight' || code === 'KeyC') && !this.keyStates['hldf']) {
+            this.holdPiece(); this.keyStates['hldf'] = true;
+        }
     }
 
-    // =====================================================
-    // マルチプレイ
-    // =====================================================
-    beginMultiplayer() {
-        if (this.mpActive) return;
-        this.mpActive   = true;
-        this.seriesDone = false;
+    _swapCanvas(mode) {
+        if (mode === 'battle') {
+            this.canvas     = document.getElementById('b-game-canvas');
+            this.nextCanvas = document.getElementById('b-next-canvas');
+            this.holdCanvas = document.getElementById('b-hold-canvas');
+        } else {
+            this.canvas     = document.getElementById('game-canvas');
+            this.nextCanvas = document.getElementById('next-canvas');
+            this.holdCanvas = document.getElementById('hold-canvas');
+        }
+        this.ctx     = this.canvas.getContext('2d');
+        this.nextCtx = this.nextCanvas.getContext('2d');
+        this.holdCtx = this.holdCanvas.getContext('2d');
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // ロビー UI
+    // ─────────────────────────────────────────────────────────
+    initLobbyUI(code, isHost) {
+        const codeEl = document.getElementById('lobby-room-code-display');
+        if (codeEl) codeEl.textContent = code;
+
+        // Host-only settings
+        document.querySelectorAll('.lobby-select').forEach(s => { s.disabled = !isHost; });
+        const startBtn = document.getElementById('lobby-start-btn');
+        if (startBtn) startBtn.classList.toggle('hidden', !isHost);
+
+        // Clear chat
+        const chatEl = document.getElementById('lobby-chat-messages');
+        if (chatEl) chatEl.innerHTML = '';
+    }
+
+    renderLobby(room) {
+        // ── Player slots ──
+        const container = document.getElementById('lobby-slots');
+        if (container) {
+            container.innerHTML = '';
+            for (let s = 1; s <= 4; s++) {
+                const id        = room[`p${s}Id`]        || '';
+                const name      = room[`p${s}Name`]      || '';
+                const ready     = !!room[`p${s}Ready`];
+                const spectator = !!room[`p${s}Spectator`];
+                const isMe      = id === this.userId;
+                const isHostSlot= id === room.hostId;
+
+                const card = document.createElement('div');
+                card.className = 'lobby-slot-card' +
+                    (id ? ' filled' : ' empty') +
+                    (isMe ? ' mine' : '') +
+                    (ready ? ' ready-state' : '');
+
+                if (id) {
+                    card.innerHTML = `
+                        <div class="slot-avatar">${this._esc(name[0] || '?').toUpperCase()}</div>
+                        <div class="slot-info">
+                          <div class="slot-name">${this._esc(name)}${isHostSlot ? ' <span class="host-crown">👑</span>' : ''}</div>
+                          <div class="slot-badges">
+                            ${spectator ? '<span class="badge-spectate">👁 観戦</span>' : ''}
+                            ${ready
+                                ? '<span class="badge-ready">✓ 準備完了</span>'
+                                : '<span class="badge-wait">待機中</span>'}
+                          </div>
+                        </div>`;
+                } else {
+                    card.innerHTML = `<div class="slot-empty-txt">— 空き —</div>`;
+                }
+                container.appendChild(card);
+            }
+        }
+
+        // ── My action buttons state ──
+        const mySlot    = this.mp.mySlot;
+        const myReady   = !!room[`p${mySlot}Ready`];
+        const mySpec    = !!room[`p${mySlot}Spectator`];
+        const readyBtn  = document.getElementById('lobby-ready-btn');
+        const specBtn   = document.getElementById('lobby-spectate-btn');
+        if (readyBtn) {
+            readyBtn.textContent = myReady ? '✓ 準備完了' : '準備する';
+            readyBtn.classList.toggle('active', myReady);
+        }
+        if (specBtn) specBtn.classList.toggle('active', mySpec);
+
+        // ── Settings UI (reflect current) ──
+        const s  = this.mp.settings;
+        const mw = document.getElementById('lobby-max-wins-sel');
+        const ah = document.getElementById('lobby-hold-sel');
+        const tg = document.getElementById('lobby-target-sel');
+        if (mw && !mw.matches(':focus')) mw.value = String(s.maxWins || 3);
+        if (ah && !ah.matches(':focus')) ah.value = s.allowHold ? '1' : '0';
+        if (tg && !tg.matches(':focus')) tg.value = s.garbageTarget || 'random';
+
+        // ── Chat ──
+        const chatMsgs = this.mp.mergeChat(room);
+        const chatHash = chatMsgs.map(m => m.ts).join(',');
+        if (chatHash !== this.mp._lastChatHash) {
+            this.mp._lastChatHash = chatHash;
+            const chatEl = document.getElementById('lobby-chat-messages');
+            if (chatEl) {
+                chatEl.innerHTML = chatMsgs.map(m =>
+                    `<div class="chat-line"><span class="chat-nm">${this._esc(m.n)}</span>: <span class="chat-tx">${this._esc(m.t)}</span></div>`
+                ).join('');
+                chatEl.scrollTop = chatEl.scrollHeight;
+            }
+        }
+
+        // ── Start button state ──
+        if (this.mp.isHost) {
+            const gamers  = this.mp._gamers(room);
+            const allRdy  = gamers.length >= 2 && gamers.every(s => room[`p${s}Spectator`] || room[`p${s}Ready`]);
+            const startBtn = document.getElementById('lobby-start-btn');
+            if (startBtn) {
+                startBtn.disabled = gamers.length < 2 || !allRdy;
+            }
+            const statusEl = document.getElementById('lobby-status-msg');
+            if (statusEl) {
+                if (gamers.length < 2) statusEl.textContent = '2人以上の参加者が必要です';
+                else if (!allRdy)      statusEl.textContent = '全員の準備完了を待っています...';
+                else                   statusEl.textContent = '全員準備完了！ゲームを開始できます ✓';
+            }
+        } else {
+            const statusEl = document.getElementById('lobby-status-msg');
+            if (statusEl) statusEl.textContent = 'ホストがゲームを開始するまで待機中...';
+        }
+    }
+
+    updateLobbyCountdown(n) {
+        const statusEl = document.getElementById('lobby-status-msg');
+        if (statusEl) statusEl.textContent = n > 0 ? `⏳ ${n}秒後にゲーム開始...` : '🚀 ゲーム開始！';
+        const startBtn = document.getElementById('lobby-start-btn');
+        if (startBtn) startBtn.style.display = 'none';
+    }
+
+    _esc(s) {
+        return String(s || '').replace(/[&<>'"]/g, c =>
+            ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[c] || c));
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // マルチプレイ開始・ラウンド
+    // ─────────────────────────────────────────────────────────
+    beginMultiplayer(room) {
+        this.mpActive    = true;
+        this.seriesDone  = false;
+        this.mySpectator = !!room[`p${this.mp.mySlot}Spectator`];
+
         this._swapCanvas('battle');
         this._bindMobile('bm-');
-        this.resetGame();
         this.switchScreen('battle-screen');
-        this.toggleHostStartButton(false);
-        this.mp.lastRoundSeen = this.mp.roundNum;
-        this._battleInit();
+
+        // Build dynamic header and opponent boards
+        this._buildBattleUI(room);
+
+        const resultOv = document.getElementById('battle-result-overlay');
+        if (resultOv) resultOv.classList.add('hidden');
+
+        if (this.mySpectator) {
+            // Show spectate overlay
+            const specOv = document.getElementById('spectate-overlay');
+            const gameContent = document.getElementById('battle-game-content');
+            if (specOv) specOv.classList.remove('hidden');
+            if (gameContent) gameContent.style.display = 'none';
+            return; // Don't start game loop
+        }
+
+        // Hide spectate overlay
+        const specOv = document.getElementById('spectate-overlay');
+        const gameContent = document.getElementById('battle-game-content');
+        if (specOv) specOv.classList.add('hidden');
+        if (gameContent) gameContent.style.display = '';
+
+        this.resetGame();
         this.gameRunning = true; this.isPaused = false;
         this.gameStartTime = this.dropTime = Date.now();
         this.setDifficulty(this.difficulty);
@@ -719,78 +1125,224 @@ class Tetris {
     beginNextRound() {
         const ov = document.getElementById('battle-result-overlay');
         if (ov) ov.classList.add('hidden');
-        this.mp.opponentAlive  = true;
-        this.mp.pendingGarbage = 0;
-        this.mp.lastOppAtk     = 0;
+        this.mp._resetRound();
+
+        if (this.mySpectator) return;
+
         this.resetGame();
-        this._battleInit();
+        this._updateBattleRoundBadge();
         this.gameRunning = true; this.isPaused = false;
-        this.dropTime = Date.now();
+        this.dropTime    = Date.now();
         this.setDifficulty(this.difficulty);
         this.updateDisplay();
         this.gameLoop();
     }
 
-    _battleInit() {
-        const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
-        set('battle-my-name',       this.playerName);
-        set('battle-opponent-name', this.mp.opponentName || '対戦相手');
-        set('battle-my-score',  '0');
-        set('battle-opp-score', '0');
-        set('garbage-count',    '0');
-        set('attack-count',     '0');
-        set('battle-round-badge', `Round ${this.mp.roundNum}`);
-        this._renderStars();
+    _buildBattleUI(room) {
+        // Build the players header row
+        const hdr = document.getElementById('battle-players-header');
+        if (hdr) {
+            const active = this.mp._activePlayers(room);
+            hdr.innerHTML = active.map(s => {
+                const name  = room[`p${s}Name`] || `P${s}`;
+                const wins  = parseInt(room[`p${s}Wins`] || 0);
+                const maxW  = this.mp.settings.maxWins || 3;
+                const isMe  = s === this.mp.mySlot;
+                let stars = '';
+                for (let i = 0; i < maxW; i++) {
+                    stars += `<span class="win-star${i < wins ? ' filled' : ''}">★</span>`;
+                }
+                return `<div class="bh-player${isMe ? ' bh-me' : ''}">
+                    <span class="bh-name">${this._esc(name)}</span>
+                    <div class="win-stars-row">${stars}</div>
+                  </div>`;
+            }).join('<span class="bh-sep">•</span>');
+        }
+
+        this._updateBattleRoundBadge();
+
+        // Build opponent mini boards
+        this._buildOppBoards(room);
     }
 
-    updateOpponentName(name) {
-        const el = document.getElementById('battle-opponent-name');
-        if (el) el.textContent = name || '対戦相手';
+    _buildOppBoards(room) {
+        const container = document.getElementById('opp-boards-container');
+        if (!container) return;
+        container.innerHTML = '';
+        this._oppCanvases = {};
+
+        const opps = this.mp._activePlayers(room).filter(s => s !== this.mp.mySlot);
+        opps.forEach(s => {
+            const name = room[`p${s}Name`] || `P${s}`;
+            const div  = document.createElement('div');
+            div.className  = 'opp-mini-card';
+            div.id         = `opp-card-${s}`;
+            div.dataset.slot = s;
+            div.innerHTML  = `
+                <div class="opp-mini-name" id="opp-name-${s}">${this._esc(name)}</div>
+                <canvas class="opp-mini-canvas" id="opp-canvas-${s}" width="100" height="200"></canvas>
+                <div class="opp-mini-score">SCORE: <span id="opp-score-${s}">0</span></div>`;
+            container.appendChild(div);
+            this._oppCanvases[s] = div.querySelector(`#opp-canvas-${s}`);
+        });
     }
 
-    _renderStars() {
-        const draw = (id, wins, max) => {
-            const el = document.getElementById(id); if (!el) return;
-            let h = '';
-            for (let i = 0; i < max; i++) h += `<span class="win-star${i < wins ? ' filled' : ''}">★</span>`;
-            el.innerHTML = h;
-        };
-        draw('my-win-stars',  this.mp.myWins,  this.mp.maxWins);
-        draw('opp-win-stars', this.mp.oppWins, this.mp.maxWins);
+    _updateBattleRoundBadge() {
+        const el = document.getElementById('battle-round-badge');
+        if (el) el.textContent = `Round ${this.mp.roundNum}`;
     }
 
-    // ★ ラウンド勝利
-    onRoundWon() {
+    _updateOpponents(room) {
+        const active = this.mp._activePlayers(room);
+        active.filter(s => s !== this.mp.mySlot).forEach(s => {
+            // Update score
+            const scoreEl = document.getElementById(`opp-score-${s}`);
+            if (scoreEl) scoreEl.textContent = (parseInt(room[`p${s}Score`] || 0)).toLocaleString();
+
+            // Death indicator
+            const card = document.getElementById(`opp-card-${s}`);
+            if (card) {
+                const alive = room[`p${s}Alive`] === true || room[`p${s}Alive`] === 'true';
+                card.classList.toggle('opp-dead', !alive);
+            }
+
+            // Draw mini board
+            const canvas = this._oppCanvases[s] || document.getElementById(`opp-canvas-${s}`);
+            if (!canvas) return;
+            const board = this.mp._decodeBoard(room[`p${s}Board`] || '');
+            this._drawMiniBoard(canvas, board);
+        });
+
+        // Spectator view: also update all boards
+        if (this.mySpectator) {
+            this._renderSpectatorView(room);
+        }
+    }
+
+    _drawMiniBoard(canvas, board) {
+        const ctx = canvas.getContext('2d');
+        const W = canvas.width, H = canvas.height;
+        const bs = W / 10;
+
+        ctx.fillStyle = '#050510';
+        ctx.fillRect(0, 0, W, H);
+
+        // Light grid
+        ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+        ctx.lineWidth   = 0.5;
+        for (let x = 0; x <= 10; x++) { ctx.beginPath(); ctx.moveTo(x*bs, 0); ctx.lineTo(x*bs, H); ctx.stroke(); }
+        for (let y = 0; y <= 20; y++) { ctx.beginPath(); ctx.moveTo(0, y*bs); ctx.lineTo(W, y*bs); ctx.stroke(); }
+
+        if (!board) return;
+        for (let y = 0; y < 20 && y < board.length; y++) {
+            if (!board[y]) continue;
+            for (let x = 0; x < 10; x++) {
+                const c = board[y][x];
+                if (!c) continue;
+                ctx.fillStyle = typeof c === 'string' ? c : '#666';
+                ctx.fillRect(x*bs + 0.5, y*bs + 0.5, bs - 1, bs - 1);
+                // Simple highlight (lightweight)
+                ctx.fillStyle = 'rgba(255,255,255,0.22)';
+                ctx.fillRect(x*bs + 0.5, y*bs + 0.5, bs - 1, Math.max(1, bs * 0.2));
+            }
+        }
+    }
+
+    _renderSpectatorView(room) {
+        const boards = document.getElementById('spectate-boards');
+        if (!boards) return;
+        const gamers = this.mp._gamers(room);
+
+        // Build canvases if not done
+        gamers.forEach(s => {
+            let card = document.getElementById(`spec-card-${s}`);
+            if (!card) {
+                card = document.createElement('div');
+                card.className = 'spec-board-card';
+                card.id        = `spec-card-${s}`;
+                card.innerHTML = `<div class="spec-player-name">${this._esc(room[`p${s}Name`] || `P${s}`)}</div>
+                    <canvas id="spec-canvas-${s}" class="spec-canvas" width="150" height="300"></canvas>
+                    <div class="spec-player-score">SCORE: <span id="spec-score-${s}">0</span></div>`;
+                boards.appendChild(card);
+            }
+            const alive = room[`p${s}Alive`] === true || room[`p${s}Alive`] === 'true';
+            card.classList.toggle('spec-dead', !alive);
+            const sc = document.getElementById(`spec-score-${s}`);
+            if (sc) sc.textContent = (parseInt(room[`p${s}Score`] || 0)).toLocaleString();
+            const canvas = document.getElementById(`spec-canvas-${s}`);
+            if (canvas) this._drawMiniBoard(canvas, this.mp._decodeBoard(room[`p${s}Board`] || ''));
+        });
+
+        // Update spectator chat
+        const chatMsgs = this.mp.mergeChat(room);
+        const chatHash = chatMsgs.map(m => m.ts).join(',');
+        const chatEl = document.getElementById('spectate-chat-messages');
+        if (chatEl && chatHash !== this._specChatHash) {
+            this._specChatHash = chatHash;
+            chatEl.innerHTML = chatMsgs.map(m =>
+                `<div class="chat-line"><span class="chat-nm">${this._esc(m.n)}</span>: <span class="chat-tx">${this._esc(m.t)}</span></div>`
+            ).join('');
+            chatEl.scrollTop = chatEl.scrollHeight;
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // ラウンド勝敗コールバック
+    // ─────────────────────────────────────────────────────────
+    onRoundWon(room) {
         this.gameRunning = false;
         this._stopTimers();
-        this._renderStars();
+        this._refreshBattleStars(room);
+        const myWins = parseInt(room?.[`p${this.mp.mySlot}Wins`] || 0);
         this._showResult(true, false,
             `🏆 Round ${this.mp.roundNum} 勝利！`,
-            `${this.mp.myWins} / ${this.mp.maxWins} 勝  —  ${this.mp.opponentName || '対戦相手'}を撃破！次のラウンドへ...`,
+            `${myWins} / ${this.mp.settings.maxWins} 勝  —  次のラウンドへ...`,
             false
         );
-        if (this.mp.isHost) setTimeout(() => this.mp.hostStartNextRound(), 3000);
     }
 
-    // ★ シリーズ終了
-    onSeriesEnd(iWon) {
+    onSeriesEnd(iWon, room) {
         if (this.seriesDone) return;
         this.seriesDone  = true;
         this.gameRunning = false;
         this._stopTimers();
-        this._renderStars();
+        if (room) this._refreshBattleStars(room);
         if (iWon) {
-            this._showResult(true,  true, '🎉 シリーズ勝利！', `先${this.mp.maxWins}勝達成！おめでとうございます！`, true);
+            this._showResult(true,  true, '🎉 シリーズ勝利！', `先${this.mp.settings.maxWins}勝達成！おめでとうございます！`, true);
         } else {
-            this._showResult(false, true, '💀 シリーズ敗北', `相手が先${this.mp.maxWins}勝で優勝です...`, true);
+            this._showResult(false, true, '💀 シリーズ敗北', `相手が先${this.mp.settings.maxWins}勝で優勝です...`, true);
         }
     }
 
+    onMultiplayerAbandoned() {
+        this.gameRunning = false;
+        this.mpActive    = false;
+        this._swapCanvas('solo');
+        this.showHome();
+    }
+
+    _refreshBattleStars(room) {
+        const hdr = document.getElementById('battle-players-header');
+        if (!hdr || !room) return;
+        const maxW = this.mp.settings.maxWins || 3;
+        this.mp._activePlayers(room).forEach(s => {
+            const wins = parseInt(room[`p${s}Wins`] || 0);
+            // Re-render stars in header
+            const playerDiv = hdr.querySelector(`.bh-player:nth-child(${s})`);
+            if (!playerDiv) return;
+            const starsDiv = playerDiv.querySelector('.win-stars-row');
+            if (!starsDiv) return;
+            let h = '';
+            for (let i = 0; i < maxW; i++) h += `<span class="win-star${i < wins ? ' filled' : ''}">★</span>`;
+            starsDiv.innerHTML = h;
+        });
+    }
+
     _showResult(isWin, isEnd, title, msg, showBtn) {
-        const ov     = document.getElementById('battle-result-overlay');
-        const titleEl= document.getElementById('battle-result-title');
-        const msgEl  = document.getElementById('battle-result-message');
-        const homeBtn= document.getElementById('battle-result-home');
+        const ov      = document.getElementById('battle-result-overlay');
+        const titleEl = document.getElementById('battle-result-title');
+        const msgEl   = document.getElementById('battle-result-message');
+        const homeBtn = document.getElementById('battle-result-home');
         if (titleEl) { titleEl.textContent = title; titleEl.style.color = isWin ? '#00ff88' : '#ff4444'; }
         if (msgEl)   msgEl.textContent = msg;
         if (homeBtn) homeBtn.style.display = showBtn ? 'inline-flex' : 'none';
@@ -798,7 +1350,7 @@ class Tetris {
             ov.classList.remove('result-win', 'result-lose');
             ov.classList.add(isWin ? 'result-win' : 'result-lose');
             ov.classList.remove('hidden');
-            if (!isEnd) setTimeout(() => ov.classList.add('hidden'), 2800);
+            if (!isEnd) setTimeout(() => ov.classList.add('hidden'), 3000);
         }
     }
 
@@ -808,36 +1360,31 @@ class Tetris {
         this.showHome();
     }
 
-    // =====================================================
+    // ─────────────────────────────────────────────────────────
     // ランキング
-    // =====================================================
-      async fetchRanking(force = false) {
+    // ─────────────────────────────────────────────────────────
+    async fetchRanking(force = false) {
         const now = Date.now();
         if (this.rankingFetchInFlight) return;
         if (!force && now - this.lastRankingFetchAt < 2000) return;
-
         this.rankingFetchInFlight = true;
-        this.lastRankingFetchAt = now;
-
+        this.lastRankingFetchAt   = now;
         ['home-ranking-list','ranking-list','game-over-ranking-list'].forEach(id => {
             const el = document.getElementById(id);
             if (el && !el.innerHTML) el.innerHTML = '<p style="color:#888;font-size:0.85rem;text-align:center;padding:10px">読み込み中...</p>';
         });
-
         try {
             const res  = await API.get('tetris_ranking', { sort: '-score', limit: 10 });
             const data = (res.data || []).map(r => ({
-                playerName: r.playerName || 'Player',
-                score: r.score || 0,
-                userId: this._extractRankingEntryKey(r)
+                playerName: r.playerName || 'Player', score: r.score || 0,
+                userId: this._extractRankingKey(r)
             }));
             const merged = this._mergeRanking(data, this._localRanking());
             this._renderRanking(merged);
-            this._syncPersonalBestFromRanking(merged);
-        } catch (_) {
+            this._syncPersonalBest(merged);
+        } catch(_) {
             const local = this._localRanking();
-            this._renderRanking(local);
-            this._syncPersonalBestFromRanking(local);
+            this._renderRanking(local); this._syncPersonalBest(local);
         } finally {
             this.rankingFetchInFlight = false;
         }
@@ -847,41 +1394,26 @@ class Tetris {
         this._saveLocal();
         if (this.score <= 0) return;
         try {
-            const canonicalKey = this._buildRankingUserKey();
-            const keys = this._rankingSearchKeys();
-            const res = await API.get('tetris_ranking', { search: keys.join(' '), limit: 50 });
-            const ex  = (res.data || []).find(r => keys.includes(this._extractRankingEntryKey(r)));
+            const key = this._buildRankingUserKey();
+            const keys = [key, this.userId, `name:${this.playerName.toLowerCase()}`];
+            const res  = await API.get('tetris_ranking', { search: keys.join(' '), limit: 50 });
+            const ex   = (res.data || []).find(r => keys.includes(this._extractRankingKey(r)));
             if (ex) {
-                if (ex.score < this.score) {
-                    await API.patch('tetris_ranking', ex.id, {
-                        playerName: this.playerName,
-                        score: this.score,
-                        userId: canonicalKey
-                    });
-                }
+                if (ex.score < this.score) await API.patch('tetris_ranking', ex.id, { playerName: this.playerName, score: this.score, userId: key });
             } else {
-                await API.post('tetris_ranking', {
-                    userId: canonicalKey,
-                    playerName: this.playerName,
-                    score: this.score
-                });
+                await API.post('tetris_ranking', { userId: key, playerName: this.playerName, score: this.score });
             }
-            this._normalizeMatchSettings();
-        this._updateMatchSettingsUI();
-        this.fetchRanking(true);
-        } catch (_) {}
+            this.fetchRanking(true);
+        } catch(_) {}
     }
 
     _saveLocal() {
         if (this.score <= 0) return;
         const key = this._buildRankingUserKey();
         const list = this._localRanking();
-        const idx = list.findIndex(r => this._isMyRankingEntry(r));
-        if (idx >= 0) {
-            if (list[idx].score < this.score) list[idx] = { playerName: this.playerName, score: this.score, userId: key };
-        } else {
-            list.push({ playerName: this.playerName, score: this.score, userId: key });
-        }
+        const idx  = list.findIndex(r => this._isMyEntry(r));
+        if (idx >= 0) { if (list[idx].score < this.score) list[idx] = { playerName: this.playerName, score: this.score, userId: key }; }
+        else list.push({ playerName: this.playerName, score: this.score, userId: key });
         localStorage.setItem('tetrisOfflineRanking', JSON.stringify(this._sortRank(list)));
     }
 
@@ -890,46 +1422,25 @@ class Tetris {
             .map((e, i) => this._normEntry(e, `l${i}`)).filter(Boolean);
         const hs = Number(localStorage.getItem('tetrisHighScore') || '0');
         const key = this._buildRankingUserKey();
-        if (hs > 0 && !list.some(r => this._isMyRankingEntry(r) && r.score >= hs)) {
+        if (hs > 0 && !list.some(r => this._isMyEntry(r) && r.score >= hs))
             list.push({ playerName: this.playerName || 'Player', score: hs, userId: key });
-        }
         return this._sortRank(list);
     }
 
-    _syncPersonalBestFromRanking(list = []) {
-        const mine = list.filter(r => this._isMyRankingEntry(r));
+    _syncPersonalBest(list = []) {
+        const mine = list.filter(r => this._isMyEntry(r));
         if (!mine.length) return;
         const best = Math.max(...mine.map(r => Number(r.score) || 0));
         if (best > this.highScore) {
             this.highScore = best;
             localStorage.setItem('tetrisHighScore', this.highScore);
-            this._updateHomeStats();
-            this.updateDisplay();
+            this._updateHomeStats(); this.updateDisplay();
         }
     }
 
-    _extractRankingEntryKey(entry) {
-        return String((entry && (entry.userId || entry.rankingUserKey)) || '').trim();
-    }
-
-    _rankingSearchKeys() {
-        const keys = new Set([this._buildRankingUserKey(), this.userId]);
-        const name = String(this.playerName || '').trim().toLowerCase();
-        if (name && name !== 'player') keys.add(`name:${name}`);
-        return [...keys];
-    }
-
-    _isMyRankingEntry(entry) {
-        const key = this._extractRankingEntryKey(entry);
-        if (!key) return false;
-        return this._rankingSearchKeys().includes(key);
-    }
-
-    _buildRankingUserKey() {
-        this.rankingUserKey = `uid:${this.userId}`;
-        return this.rankingUserKey;
-    }
-
+    _extractRankingKey(e) { return String((e && (e.userId || e.rankingUserKey)) || '').trim(); }
+    _isMyEntry(e)         { return [this._buildRankingUserKey(), this.userId].includes(this._extractRankingKey(e)); }
+    _buildRankingUserKey(){ this.rankingUserKey = `uid:${this.userId}`; return this.rankingUserKey; }
     _mergeRanking(a, b) {
         const m = new Map();
         [...a, ...b].forEach(e => {
@@ -937,40 +1448,34 @@ class Tetris {
             const k = n.userId || `${n.playerName}_${n.score}`;
             if (!m.has(k) || m.get(k).score < n.score) m.set(k, n);
         });
-        const out = []; m.forEach(v => out.push(v));
-        return this._sortRank(out);
+        const out = []; m.forEach(v => out.push(v)); return this._sortRank(out);
     }
-
     _normEntry(e, fb = '') {
         if (!e) return null;
-        const s = Number(e.score);
-        if (!isFinite(s) || s <= 0) return null;
+        const s = Number(e.score); if (!isFinite(s) || s <= 0) return null;
         return { playerName: String(e.playerName || 'Player'), score: s, userId: e.userId || fb };
     }
-
     _sortRank(a) { return a.filter(Boolean).sort((x, y) => y.score - x.score).slice(0, 10); }
-
     _renderRanking(data) {
         const medals = ['🥇','🥈','🥉'];
         const render = id => {
             const el = document.getElementById(id); if (!el) return;
-            if (!data || !data.length) { el.innerHTML = '<p style="color:#666;font-size:0.82rem;text-align:center;padding:16px 0;">まだデータがありません</p>'; return; }
+            if (!data?.length) { el.innerHTML = '<p style="color:#666;font-size:0.82rem;text-align:center;padding:16px 0;">まだデータがありません</p>'; return; }
             let h = '<div class="ranking-list">';
             data.forEach((d, i) => {
                 const cls   = i < 3 ? `rank-${i+1}` : '';
                 const label = i < 3 ? medals[i] : `${i+1}`;
-                const name  = (d.playerName||'Player').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]||c));
+                const name  = this._esc(d.playerName || 'Player');
                 h += `<div class="ranking-item ${cls}"><span class="ranking-rank">${label}</span><span class="ranking-name">${name}</span><span class="ranking-score">${Number(d.score).toLocaleString()}</span></div>`;
             });
-            h += '</div>';
-            el.innerHTML = h;
+            el.innerHTML = h + '</div>';
         };
         ['home-ranking-list','ranking-list','game-over-ranking-list'].forEach(render);
     }
 
-    // =====================================================
+    // ─────────────────────────────────────────────────────────
     // キーコンフィグ
-    // =====================================================
+    // ─────────────────────────────────────────────────────────
     _setupKeyConfig() {
         document.querySelectorAll('.key-btn').forEach(btn => {
             const action = btn.getAttribute('data-key');
@@ -979,23 +1484,27 @@ class Tetris {
                 btn.textContent = '...'; btn.classList.add('key-btn-listening');
                 const h = e => {
                     e.preventDefault();
-                    let name = e.key === ' ' ? 'Space' : e.key.replace('Arrow','');
-                    if (e.key === 'Control') name = 'Ctrl';
                     this.controls[action] = e.code;
                     localStorage.setItem('tetrisControls', JSON.stringify(this.controls));
-                    btn.textContent = name; btn.classList.remove('key-btn-listening');
+                    btn.textContent = this._kName(e.code);
+                    btn.classList.remove('key-btn-listening');
                     document.removeEventListener('keydown', h);
-                    this.showToast(`✓ キー設定: ${name}`);
+                    this.showToast(`✓ キー設定: ${this._kName(e.code)}`);
                     this._refreshControlsUI();
                 };
                 document.addEventListener('keydown', h);
-                setTimeout(() => { document.removeEventListener('keydown', h); btn.textContent = this._kName(this.controls[action]); btn.classList.remove('key-btn-listening'); }, 5000);
+                setTimeout(() => {
+                    document.removeEventListener('keydown', h);
+                    btn.textContent = this._kName(this.controls[action]);
+                    btn.classList.remove('key-btn-listening');
+                }, 5000);
             };
         });
     }
 
     _kName(k) {
-        const m = { ArrowLeft:'←',ArrowRight:'→',ArrowUp:'↑',ArrowDown:'↓',Space:'Space',ControlLeft:'Ctrl',ControlRight:'Ctrl',AltLeft:'Alt',AltRight:'Alt',KeyP:'P' };
+        const m = { ArrowLeft:'←', ArrowRight:'→', ArrowUp:'↑', ArrowDown:'↓', Space:'Space',
+                    ControlLeft:'Ctrl', ControlRight:'Ctrl', AltLeft:'Alt', AltRight:'Alt', KeyP:'P' };
         return m[k] || (k ? k.replace('Key','').replace('Digit','') : '?');
     }
 
@@ -1011,69 +1520,41 @@ class Tetris {
         s('key-disp-pause',       g('pause'));
     }
 
-    _normalizeMatchSettings() {
-        if (![1,2,3,5].includes(this.matchMaxWins)) this.matchMaxWins = 3;
-    }
+    _normalizeMatchSettings() { /* retained for compatibility */ }
 
-    setMatchMaxWins(wins, persist = true) {
-        const n = [1,2,3,5].includes(wins) ? wins : 3;
-        this.matchMaxWins = n;
-        if (persist) localStorage.setItem('tetrisMatchMaxWins', String(n));
-        this._updateMatchSettingsUI();
-    }
-
-    _updateMatchSettingsUI() {
-        const select = document.getElementById('max-wins-select');
-        if (select) select.value = String(this.matchMaxWins);
-        const label = document.getElementById('max-wins-label');
-        if (label) label.textContent = `先${this.matchMaxWins}勝制`;
-    }
-
-    toggleHostStartButton(show) {
-        const btn = document.getElementById('host-start-button');
-        if (!btn) return;
-        btn.classList.toggle('hidden', !show);
-    }
-
-    // =====================================================
+    // ─────────────────────────────────────────────────────────
     // 難易度 / テーマ / 名前
-    // =====================================================
+    // ─────────────────────────────────────────────────────────
     setDifficulty(d) {
-        this.difficulty = d;
-        localStorage.setItem('tetrisDifficulty', d);
-        this.dropInterval = { easy:1200, normal:1000, hard:700 }[d] || 1000;
+        this.difficulty = d; localStorage.setItem('tetrisDifficulty', d);
+        this.dropInterval = { easy: 1200, normal: 1000, hard: 700 }[d] || 1000;
         this._updateDiffUI();
     }
+
     _updateDiffUI() {
         document.querySelectorAll('.difficulty-button').forEach(b => b.classList.remove('active'));
         const el = document.getElementById(`${this.difficulty || 'normal'}-mode`);
         if (el) el.classList.add('active');
-        const descs = { easy:'ゆっくりとした速度で、初心者でも遊びやすくなっています。', normal:'標準的な速度でプレイできます。', hard:'高速で落下し、上級者向けの難易度です。' };
+        const descs = { easy:'ゆっくりとした速度で初心者向け。', normal:'標準的な速度でプレイ。', hard:'高速で上級者向け。' };
         const d = document.getElementById('difficulty-description'); if (d) d.textContent = descs[this.difficulty] || '';
     }
 
     setTheme(t) {
-        this.currentTheme = t;
-        localStorage.setItem('tetrisTheme', t);
-        document.body.className = `theme-${t}`;
-        this._updateThemeUI();
+        this.currentTheme = t; localStorage.setItem('tetrisTheme', t);
+        document.body.className = `theme-${t}`; this._updateThemeUI();
     }
+
     _updateThemeUI() {
         document.querySelectorAll('.theme-button').forEach(b => b.classList.remove('active'));
         const el = document.getElementById(`theme-${this.currentTheme}`); if (el) el.classList.add('active');
     }
 
     _saveName() {
-        this.playerName = document.getElementById('player-name-input').value.trim() || 'Player';
+        const inp = document.getElementById('player-name-input');
+        if (inp) this.playerName = inp.value.trim() || this.playerName || 'Player';
+        this.playerName = this.playerName || 'Player';
         localStorage.setItem('tetrisPlayerName', this.playerName);
         this._buildRankingUserKey();
-        this._normalizeMatchSettings();
-        this._updateMatchSettingsUI();
-        this.fetchRanking(true);
-        const btn = document.getElementById('save-name-button');
-        const orig = btn.textContent;
-        btn.textContent = '✓ 保存完了'; btn.style.background = 'linear-gradient(45deg,#00ff88,#00cc6a)';
-        setTimeout(() => { btn.textContent = orig; btn.style.background = ''; }, 2000);
     }
 
     _updateHomeStats() {
@@ -1084,9 +1565,9 @@ class Tetris {
         s('total-lines', this.totalLines.toLocaleString());
     }
 
-    // =====================================================
+    // ─────────────────────────────────────────────────────────
     // ソロ
-    // =====================================================
+    // ─────────────────────────────────────────────────────────
     startSolo() {
         this._swapCanvas('solo');
         this.switchScreen('game-screen');
@@ -1120,26 +1601,29 @@ class Tetris {
 
     _empty() { return Array.from({ length: this.BOARD_H }, () => new Array(this.BOARD_W).fill(0)); }
 
-    // =====================================================
+    // ─────────────────────────────────────────────────────────
     // ピース
-    // =====================================================
+    // ─────────────────────────────────────────────────────────
     PIECES = {
-        I:{ shape:[[0,0,0,0],[1,1,1,1],[0,0,0,0],[0,0,0,0]], color:'#00f5ff' },
-        O:{ shape:[[1,1],[1,1]],                               color:'#f5f500' },
-        T:{ shape:[[0,1,0],[1,1,1]],                           color:'#d400ff' },
-        S:{ shape:[[0,1,1],[1,1,0]],                           color:'#00e500' },
-        Z:{ shape:[[1,1,0],[0,1,1]],                           color:'#ff2020' },
-        J:{ shape:[[1,0,0],[1,1,1]],                           color:'#3366ff' },
-        L:{ shape:[[0,0,1],[1,1,1]],                           color:'#ff8c00' }
+        I: { shape: [[0,0,0,0],[1,1,1,1],[0,0,0,0],[0,0,0,0]], color: '#00f5ff' },
+        O: { shape: [[1,1],[1,1]],                               color: '#f5f500' },
+        T: { shape: [[0,1,0],[1,1,1]],                           color: '#d400ff' },
+        S: { shape: [[0,1,1],[1,1,0]],                           color: '#00e500' },
+        Z: { shape: [[1,1,0],[0,1,1]],                           color: '#ff2020' },
+        J: { shape: [[1,0,0],[1,1,1]],                           color: '#3366ff' },
+        L: { shape: [[0,0,1],[1,1,1]],                           color: '#ff8c00' }
     };
 
     _fromBag() {
         if (!this.bag.length) {
             this.bag = ['I','O','T','S','Z','J','L'];
-            for (let i = this.bag.length-1; i > 0; i--) { const j = Math.floor(Math.random()*(i+1)); [this.bag[i],this.bag[j]] = [this.bag[j],this.bag[i]]; }
+            for (let i = this.bag.length-1; i > 0; i--) {
+                const j = Math.floor(Math.random()*(i+1));
+                [this.bag[i], this.bag[j]] = [this.bag[j], this.bag[i]];
+            }
         }
         const t = this.bag.pop();
-        return { type:t, shape:this.PIECES[t].shape.map(r=>[...r]), color:this.PIECES[t].color };
+        return { type: t, shape: this.PIECES[t].shape.map(r => [...r]), color: this.PIECES[t].color };
     }
 
     spawnPiece() {
@@ -1156,12 +1640,14 @@ class Tetris {
         const p = { ...this.currentPiece, x: this.currentPiece.x+dx, y: this.currentPiece.y+dy };
         if (this._hit(p)) return false;
         this.currentPiece.x += dx; this.currentPiece.y += dy;
-        if (dx !== 0 && this.lockStart > 0 && this.lockResets < this.MAX_RESETS) { this.lockStart = Date.now(); this.lockResets++; }
+        if (dx !== 0 && this.lockStart > 0 && this.lockResets < this.MAX_RESETS) {
+            this.lockStart = Date.now(); this.lockResets++;
+        }
         return true;
     }
 
-    _cw(m)  { return m[0].map((_,i) => m.map(r => r[i]).reverse()); }
-    _ccw(m) { return m[0].map((_,i) => m.map(r => r[r.length-1-i])); }
+    _cw(m)  { return m[0].map((_, i) => m.map(r => r[i]).reverse()); }
+    _ccw(m) { return m[0].map((_, i) => m.map(r => r[r.length-1-i])); }
 
     _rotate(dir) {
         const kicks = [{x:0,y:0},{x:-1,y:0},{x:1,y:0},{x:-2,y:0},{x:2,y:0},{x:0,y:-1},{x:0,y:-2}];
@@ -1187,7 +1673,10 @@ class Tetris {
 
     hardDrop() {
         const sy = this.currentPiece.y, ey = this._ghost();
-        if (ey > sy) this.hardDropTrail = { x:this.currentPiece.x, startY:sy, endY:ey, width:this.currentPiece.shape[0].length, color:this.currentPiece.color, alpha:1.0 };
+        if (ey > sy) this.hardDropTrail = {
+            x: this.currentPiece.x, startY: sy, endY: ey,
+            width: this.currentPiece.shape[0].length, color: this.currentPiece.color, alpha: 1.0
+        };
         this.currentPiece.y = ey;
         this.wasHardDrop = true; this.screenShake = 2;
         this.playSound(this.sounds.hardDrop);
@@ -1195,11 +1684,12 @@ class Tetris {
     }
 
     holdPiece() {
+        if (this.mpActive && !this.mp.settings.allowHold) return;
         if (!this.canHold) return;
-        const tmp = { type:this.currentPiece.type, shape:this.PIECES[this.currentPiece.type].shape.map(r=>[...r]), color:this.currentPiece.color };
+        const tmp = { type: this.currentPiece.type, shape: this.PIECES[this.currentPiece.type].shape.map(r=>[...r]), color: this.currentPiece.color };
         if (!this.heldPiece) { this.heldPiece = tmp; this.spawnPiece(); }
         else {
-            this.currentPiece = { ...this.heldPiece, x:Math.floor(this.BOARD_W/2)-Math.floor(this.heldPiece.shape[0].length/2), y:0 };
+            this.currentPiece = { ...this.heldPiece, x: Math.floor(this.BOARD_W/2)-Math.floor(this.heldPiece.shape[0].length/2), y: 0 };
             this.heldPiece = tmp;
         }
         this.canHold = false; this.drawHold();
@@ -1218,26 +1708,18 @@ class Tetris {
     _lock() {
         const wasHard = this.wasHardDrop, wasSoft = this.isSoftDrop;
         this.wasHardDrop = false; this.lockStart = 0; this.lockResets = 0;
-
         this.currentPiece.shape.forEach((row, y) => row.forEach((v, x) => {
             if (v && this.currentPiece.y+y >= 0)
                 this.board[this.currentPiece.y+y][this.currentPiece.x+x] = this.currentPiece.color;
         }));
-
         if (!wasHard && !wasSoft) this.playSound(this.sounds.land);
         this.clearLines();
-
         if (this.mpActive) {
             const g = this.mp.consumeGarbage();
             if (g > 0) this._addGarbage(g);
         }
-
         this.spawnPiece();
-
-        if (this.mpActive && Date.now() - this.lastBoardSend > 200) {
-            this.lastBoardSend = Date.now();
-            this.mp.sendBoard(this.board, this.score);
-        }
+        if (this.mpActive) this.mp.sendBoard(this.board, this.score);
     }
 
     _addGarbage(n) {
@@ -1264,9 +1746,9 @@ class Tetris {
         for (let x = 0; x < this.BOARD_W; x++) {
             const color = this.board[rowY]?.[x] || '#00f5ff';
             const cx = (x+0.5)*this.BS, cy = (rowY+0.5)*this.BS;
-            for (let i=0;i<4;i++) this.particles.push(new Particle(cx,cy,color,'block'));
-            for (let i=0;i<3;i++) this.particles.push(new Particle(cx,cy,'#ffffff','spark'));
-            this.particles.push(new Particle(cx,cy,color,'spark'));
+            for (let i=0;i<4;i++) this.particles.push(new Particle(cx, cy, color, 'block'));
+            for (let i=0;i<3;i++) this.particles.push(new Particle(cx, cy, '#ffffff', 'spark'));
+            this.particles.push(new Particle(cx, cy, color, 'spark'));
         }
     }
 
@@ -1292,7 +1774,6 @@ class Tetris {
             }
         }
 
-        // 全消し判定
         const allClear = cleared > 0 && this.board.every(r => r.every(c => c === 0));
 
         if (cleared === 0 && ts) {
@@ -1303,9 +1784,7 @@ class Tetris {
 
         if (cleared > 0) {
             this.comboCount++;
-
-            // ★ 音声（allClear > 4行 > 1-3行）
-            if (allClear)       this.playSound(this.sounds.allClear);
+            if (allClear)        this.playSound(this.sounds.allClear);
             else if (cleared>=4) this.playSound(this.sounds.fourClear);
             else                 this.playSound(this.sounds.lineClear);
 
@@ -1322,12 +1801,12 @@ class Tetris {
             } else if (allClear) {
                 this.showGameNotif('★ ALL CLEAR ★', '#ffffff');
                 this.flashEffect = 1.0; this.screenShake = 5;
-                for (let i=0;i<80;i++) this.particles.push(new Particle(Math.random()*this.canvas.width,Math.random()*this.canvas.height,['#00f5ff','#ff00ff','#ffff00','#00ff88','#ff6600'][i%5],'spark'));
+                for (let i=0;i<80;i++) this.particles.push(new Particle(Math.random()*this.canvas.width, Math.random()*this.canvas.height, ['#00f5ff','#ff00ff','#ffff00','#00ff88','#ff6600'][i%5], 'spark'));
                 base = 3500;
             } else if (cleared >= 4) {
                 this.showGameNotif('★ TETRIS!! ★', '#00f5ff');
                 this.flashEffect = 1.0; this.screenShake = 4;
-                for (let i=0;i<60;i++) this.particles.push(new Particle(Math.random()*this.canvas.width,Math.random()*this.canvas.height,['#00f5ff','#ff00ff','#ffff00','#00ff88','#ff6600'][i%5],'spark'));
+                for (let i=0;i<60;i++) this.particles.push(new Particle(Math.random()*this.canvas.width, Math.random()*this.canvas.height, ['#00f5ff','#ff00ff','#ffff00','#00ff88','#ff6600'][i%5], 'spark'));
             } else if (cleared === 3) {
                 this.showGameNotif('Triple!', '#ffff00');
             } else if (cleared === 2) {
@@ -1341,10 +1820,10 @@ class Tetris {
 
             this.score += Math.floor(base * this.level * mult);
             this.level  = Math.floor(this.lines/10) + 1;
-            const bi = { easy:1200, normal:1000, hard:700 }[this.difficulty] || 1000;
+            const bi    = { easy:1200, normal:1000, hard:700 }[this.difficulty] || 1000;
             this.dropInterval = Math.max(50, bi - (this.level-1)*50);
 
-            if (this.mpActive) {
+            if (this.mpActive && !this.mySpectator) {
                 let atk = this._atkLines(cleared, ts);
                 if (allClear) atk += 10;
                 if (this.comboCount > 1) atk += Math.floor(this.comboCount/2);
@@ -1365,9 +1844,9 @@ class Tetris {
         }
     }
 
-    // =====================================================
+    // ─────────────────────────────────────────────────────────
     // ゲームループ
-    // =====================================================
+    // ─────────────────────────────────────────────────────────
     gameLoop() {
         if (!this.gameRunning || this.isPaused) return;
         const now = Date.now();
@@ -1380,19 +1859,13 @@ class Tetris {
         }
         if (this.lockStart > 0 && now - this.lockStart > this.LOCK_DELAY) this._lock();
 
-        if (this.mpActive) {
+        if (this.mpActive && !this.mySpectator) {
             const s = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
-            s('garbage-count',    this.mp.pendingGarbage);
-            s('battle-my-score',  this.score.toLocaleString());
-            s('battle-opp-score', this.mp.opponentScore.toLocaleString());
-            if (now - this.lastBoardSend > 80) {
-                this.lastBoardSend = now;
-                this.mp.sendBoard(this.board, this.score);
-            }
+            s('garbage-count',   this.mp.pendingGarbage);
+            s('battle-my-score', this.score.toLocaleString());
         }
 
         this.draw();
-        if (this.mpActive) this._drawOpp();
         requestAnimationFrame(() => this.gameLoop());
     }
 
@@ -1409,22 +1882,13 @@ class Tetris {
             localStorage.setItem('tetrisHighScore', this.highScore);
         }
 
-        if (this.mpActive) {
-            this.mp.notifyDeath().then(({ seriesOver, myWins, oppWins }) => {
-                this.mp.myWins = myWins; this.mp.oppWins = oppWins;
-                this._renderStars();
-                if (seriesOver) { this.mp.stopPoll(); this.onSeriesEnd(false); }
-                else {
-                    this._showResult(false, false,
-                        `😔 Round ${this.mp.roundNum} 敗北`,
-                        `相手が勝ちました  (${this.mp.oppWins} / ${this.mp.maxWins} 勝)`,
-                        false
-                    );
-                }
-            }).catch(() => {
-                this._showResult(false, true, '💀 接続エラー', 'ネット接続を確認してください', true);
-            });
-        } else {
+        if (this.mpActive && !this.mySpectator) {
+            this.mp.notifyDeath().catch(() => {});
+            // Show waiting overlay (host will determine round outcome via polling)
+            this._showResult(false, false,
+                '💀 落下...', '対戦相手を待っています', false
+            );
+        } else if (!this.mpActive) {
             document.getElementById('final-score').textContent      = this.score.toLocaleString();
             document.getElementById('final-high-score').textContent = this.highScore.toLocaleString();
             document.getElementById('game-over').classList.remove('hidden');
@@ -1433,33 +1897,15 @@ class Tetris {
     }
 
     _stopTimers() {
-        Object.keys(this.activeTimers).forEach(k => { clearTimeout(this.activeTimers[k]); clearInterval(this.activeTimers[k]); });
+        Object.keys(this.activeTimers).forEach(k => {
+            clearTimeout(this.activeTimers[k]); clearInterval(this.activeTimers[k]);
+        });
         this.activeTimers = {}; this.keyStates = {};
     }
 
-    // =====================================================
+    // ─────────────────────────────────────────────────────────
     // 描画
-    // =====================================================
-    _drawOpp() {
-        const canvas = document.getElementById('opponent-canvas'); if (!canvas) return;
-        const ctx = canvas.getContext('2d'), bs = 12;
-        ctx.fillStyle = '#0a0a1a'; ctx.fillRect(0,0,canvas.width,canvas.height);
-        ctx.strokeStyle = 'rgba(255,255,255,0.03)'; ctx.lineWidth = 0.5;
-        for (let x=0;x<=10;x++){ctx.beginPath();ctx.moveTo(x*bs,0);ctx.lineTo(x*bs,20*bs);ctx.stroke();}
-        for (let y=0;y<=20;y++){ctx.beginPath();ctx.moveTo(0,y*bs);ctx.lineTo(10*bs,y*bs);ctx.stroke();}
-        const board = this.mp.opponentBoard; if (!board||!board.length) return;
-        for (let y=0;y<Math.min(board.length,20);y++) {
-            if (!board[y]) continue;
-            for (let x=0;x<Math.min(board[y].length,10);x++) {
-                if (board[y][x]) {
-                    ctx.fillStyle = typeof board[y][x]==='string' ? board[y][x] : '#666';
-                    ctx.fillRect(x*bs+1,y*bs+1,bs-2,bs-2);
-                    ctx.fillStyle='rgba(255,255,255,0.2)'; ctx.fillRect(x*bs+1,y*bs+1,bs-2,2);
-                }
-            }
-        }
-    }
-
+    // ─────────────────────────────────────────────────────────
     draw() {
         const ctx = this.ctx;
         ctx.save();
@@ -1469,68 +1915,72 @@ class Tetris {
             this.screenShake *= 0.72; if (this.screenShake < 0.5) this.screenShake = 0;
         }
 
-        ctx.fillStyle = '#050510'; ctx.fillRect(0,0,this.canvas.width,this.canvas.height);
+        ctx.fillStyle = '#050510'; ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
 
         if (this.flashEffect > 0) {
-            ctx.fillStyle = `rgba(0,245,255,${this.flashEffect*0.18})`; ctx.fillRect(0,0,this.canvas.width,this.canvas.height);
+            ctx.fillStyle = `rgba(0,245,255,${this.flashEffect*0.18})`; ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
             this.flashEffect -= 0.04;
         }
 
-        ctx.strokeStyle='rgba(255,255,255,0.04)'; ctx.lineWidth=0.5;
-        for(let x=0;x<=this.BOARD_W;x++){ctx.beginPath();ctx.moveTo(x*this.BS,0);ctx.lineTo(x*this.BS,this.canvas.height);ctx.stroke();}
-        for(let y=0;y<=this.BOARD_H;y++){ctx.beginPath();ctx.moveTo(0,y*this.BS);ctx.lineTo(this.canvas.width,y*this.BS);ctx.stroke();}
+        ctx.strokeStyle = 'rgba(255,255,255,0.04)'; ctx.lineWidth = 0.5;
+        for (let x=0;x<=this.BOARD_W;x++){ctx.beginPath();ctx.moveTo(x*this.BS,0);ctx.lineTo(x*this.BS,this.canvas.height);ctx.stroke();}
+        for (let y=0;y<=this.BOARD_H;y++){ctx.beginPath();ctx.moveTo(0,y*this.BS);ctx.lineTo(this.canvas.width,y*this.BS);ctx.stroke();}
 
         if (this.hardDropTrail) {
             const t = this.hardDropTrail, h = (t.endY-t.startY)*this.BS;
             if (h > 0) {
-                const g = ctx.createLinearGradient(0,t.startY*this.BS,0,t.endY*this.BS);
-                g.addColorStop(0,'rgba(255,255,255,0)');
-                g.addColorStop(0.4,`${t.color}${Math.floor(t.alpha*80).toString(16).padStart(2,'0')}`);
-                g.addColorStop(1,`rgba(255,255,255,${t.alpha*0.95})`);
-                ctx.fillStyle=g; ctx.fillRect(t.x*this.BS,t.startY*this.BS,t.width*this.BS,h);
+                const g = ctx.createLinearGradient(0, t.startY*this.BS, 0, t.endY*this.BS);
+                g.addColorStop(0, 'rgba(255,255,255,0)');
+                g.addColorStop(0.4, `${t.color}${Math.floor(t.alpha*80).toString(16).padStart(2,'0')}`);
+                g.addColorStop(1, `rgba(255,255,255,${t.alpha*0.95})`);
+                ctx.fillStyle = g; ctx.fillRect(t.x*this.BS, t.startY*this.BS, t.width*this.BS, h);
             }
             t.alpha -= 0.1; if (t.alpha <= 0) this.hardDropTrail = null;
         }
 
         if (this.lineFlashAlpha > 0) {
-            this.lineFlashRows.forEach(r=>{ctx.fillStyle=`rgba(255,255,255,${this.lineFlashAlpha*0.7})`;ctx.fillRect(0,r*this.BS,this.canvas.width,this.BS);});
-            this.lineFlashAlpha -= 0.07; if (this.lineFlashAlpha < 0){this.lineFlashAlpha=0;this.lineFlashRows=[];}
+            this.lineFlashRows.forEach(r => {
+                ctx.fillStyle = `rgba(255,255,255,${this.lineFlashAlpha*0.7})`;
+                ctx.fillRect(0, r*this.BS, this.canvas.width, this.BS);
+            });
+            this.lineFlashAlpha -= 0.07;
+            if (this.lineFlashAlpha < 0) { this.lineFlashAlpha = 0; this.lineFlashRows = []; }
         }
 
-        this.board.forEach((row,y)=>row.forEach((color,x)=>{if(color) this.drawBlock(ctx,x*this.BS,y*this.BS,this.BS,color);}));
+        this.board.forEach((row,y) => row.forEach((color,x) => { if (color) this.drawBlock(ctx, x*this.BS, y*this.BS, this.BS, color); }));
 
         if (this.mpActive && this.mp.pendingGarbage > 0) {
-            const gc = Math.min(this.mp.pendingGarbage,20);
+            const gc = Math.min(this.mp.pendingGarbage, 20);
             const blink = Math.sin(Date.now()/200)*0.3+0.5;
-            ctx.fillStyle=`rgba(255,0,0,${blink*0.5})`; ctx.fillRect(0,(this.BOARD_H-gc)*this.BS,4,gc*this.BS);
+            ctx.fillStyle = `rgba(255,0,0,${blink*0.5})`; ctx.fillRect(0, (this.BOARD_H-gc)*this.BS, 4, gc*this.BS);
         }
 
         if (this.currentPiece) {
             const gy = this._ghost();
-            this.currentPiece.shape.forEach((row,y)=>row.forEach((v,x)=>{
+            this.currentPiece.shape.forEach((row,y) => row.forEach((v,x) => {
                 if (!v) return;
                 const px = (this.currentPiece.x+x)*this.BS;
-                ctx.globalAlpha=0.2; this.drawBlock(ctx,px,(gy+y)*this.BS,this.BS,this.currentPiece.color);
-                ctx.globalAlpha=1;   this.drawBlock(ctx,px,(this.currentPiece.y+y)*this.BS,this.BS,this.currentPiece.color);
+                ctx.globalAlpha = 0.2; this.drawBlock(ctx, px, (gy+y)*this.BS, this.BS, this.currentPiece.color);
+                ctx.globalAlpha = 1;   this.drawBlock(ctx, px, (this.currentPiece.y+y)*this.BS, this.BS, this.currentPiece.color);
                 if (this.lockStart > 0) {
-                    const r = Math.min(1,(Date.now()-this.lockStart)/this.LOCK_DELAY);
-                    ctx.fillStyle=`rgba(255,60,60,${r*0.5})`; ctx.fillRect(px+1,(this.currentPiece.y+y)*this.BS+1,(this.BS-2)*r,this.BS-2);
+                    const r = Math.min(1, (Date.now()-this.lockStart)/this.LOCK_DELAY);
+                    ctx.fillStyle = `rgba(255,60,60,${r*0.5})`; ctx.fillRect(px+1, (this.currentPiece.y+y)*this.BS+1, (this.BS-2)*r, this.BS-2);
                 }
             }));
         }
 
-        this.particles = this.particles.filter(p=>p.life>0);
-        this.particles.forEach(p=>{p.update();p.draw(ctx);});
-        ctx.globalAlpha=1;
+        this.particles = this.particles.filter(p => p.life > 0);
+        this.particles.forEach(p => { p.update(); p.draw(ctx); });
+        ctx.globalAlpha = 1;
 
         if (this.gameNotif) {
             const n = this.gameNotif;
             ctx.save();
-            ctx.globalAlpha=Math.min(1,n.alpha); ctx.font='bold 26px "Orbitron",monospace'; ctx.textAlign='center';
-            ctx.shadowColor=n.color; ctx.shadowBlur=25; ctx.fillStyle=n.color;
-            ctx.fillText(n.text,this.canvas.width/2,n.y);
-            ctx.shadowBlur=0; ctx.strokeStyle='rgba(0,0,0,0.9)'; ctx.lineWidth=4;
-            ctx.strokeText(n.text,this.canvas.width/2,n.y);
+            ctx.globalAlpha = Math.min(1, n.alpha); ctx.font = 'bold 26px "Orbitron",monospace'; ctx.textAlign = 'center';
+            ctx.shadowColor = n.color; ctx.shadowBlur = 25; ctx.fillStyle = n.color;
+            ctx.fillText(n.text, this.canvas.width/2, n.y);
+            ctx.shadowBlur = 0; ctx.strokeStyle = 'rgba(0,0,0,0.9)'; ctx.lineWidth = 4;
+            ctx.strokeText(n.text, this.canvas.width/2, n.y);
             ctx.restore();
             n.alpha -= 0.022; n.y -= 0.9; if (n.alpha <= 0) this.gameNotif = null;
         }
@@ -1545,20 +1995,20 @@ class Tetris {
         ctx.beginPath();
         ctx.roundRect ? ctx.roundRect(x+1,y+1,size-2,size-2,r) : ctx.rect(x+1,y+1,size-2,size-2);
         ctx.fill();
-        ctx.fillStyle='rgba(255,255,255,0.42)'; ctx.fillRect(x+2,y+2,size-4,Math.floor(size*0.22));
-        ctx.fillStyle='rgba(255,255,255,0.18)'; ctx.fillRect(x+2,y+2,Math.floor(size*0.14),size-4);
-        ctx.fillStyle='rgba(0,0,0,0.45)';       ctx.fillRect(x+2,y+size-Math.floor(size*0.22)-1,size-4,Math.floor(size*0.22));
-        ctx.shadowColor=color; ctx.shadowBlur=4; ctx.strokeStyle=color; ctx.lineWidth=0.8;
+        ctx.fillStyle = 'rgba(255,255,255,0.42)'; ctx.fillRect(x+2,y+2,size-4,Math.floor(size*0.22));
+        ctx.fillStyle = 'rgba(255,255,255,0.18)'; ctx.fillRect(x+2,y+2,Math.floor(size*0.14),size-4);
+        ctx.fillStyle = 'rgba(0,0,0,0.45)';       ctx.fillRect(x+2,y+size-Math.floor(size*0.22)-1,size-4,Math.floor(size*0.22));
+        ctx.shadowColor = color; ctx.shadowBlur = 4; ctx.strokeStyle = color; ctx.lineWidth = 0.8;
         ctx.beginPath();
         ctx.roundRect ? ctx.roundRect(x+0.5,y+0.5,size-1,size-1,r+1) : ctx.rect(x+0.5,y+0.5,size-1,size-1);
-        ctx.stroke(); ctx.shadowBlur=0;
+        ctx.stroke(); ctx.shadowBlur = 0;
     }
 
     _drawPreview(ctx, canvas, piece) {
-        ctx.fillStyle='#06060f'; ctx.fillRect(0,0,canvas.width,canvas.height);
+        ctx.fillStyle = '#06060f'; ctx.fillRect(0, 0, canvas.width, canvas.height);
         if (!piece) return;
-        const s=18, ox=(canvas.width-piece.shape[0].length*s)/2, oy=(canvas.height-piece.shape.length*s)/2;
-        piece.shape.forEach((row,y)=>row.forEach((v,x)=>{if(v) this.drawBlock(ctx,ox+x*s,oy+y*s,s,piece.color);}));
+        const s = 18, ox = (canvas.width-piece.shape[0].length*s)/2, oy = (canvas.height-piece.shape.length*s)/2;
+        piece.shape.forEach((row,y) => row.forEach((v,x) => { if (v) this.drawBlock(ctx, ox+x*s, oy+y*s, s, piece.color); }));
     }
 
     drawNext() { this._drawPreview(this.nextCtx, this.nextCanvas, this.nextPiece); }
@@ -1578,7 +2028,9 @@ class Tetris {
     }
 }
 
-// =====================================================
+// ─────────────────────────────────────────────────────────
+// 起動
+// ─────────────────────────────────────────────────────────
 function bootTetris() {
     if (window.__booted) return;
     window.__booted = true;
